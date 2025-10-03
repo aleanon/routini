@@ -1,5 +1,4 @@
 use axum::{Router, extract::State, response::Html, routing::get};
-use tokio::join;
 
 async fn test_page(State(address): State<String>) -> Html<&'static str> {
     println!("GET request received on {}", address);
