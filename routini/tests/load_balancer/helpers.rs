@@ -12,8 +12,7 @@ impl TestApp {
     pub async fn new() -> Self {
         let listener =
             std::net::TcpListener::bind("127.0.0.1:0").expect("Failed to establish listener");
-        let port = listener.local_addr().unwrap().port();
-        let server_address = format!("http://127.0.0.1:{}", port);
+        let server_address = format!("http://{}", listener.local_addr().unwrap());
 
         let backend_listeners = vec![
             TcpListener::bind("127.0.0.1:0")
