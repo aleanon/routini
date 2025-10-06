@@ -3,17 +3,24 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use pingora::{
     Result,
-    lb::LoadBalancer,
-    prelude::{HttpPeer, RoundRobin},
+    lb::{
+        LoadBalancer,
+        selection::{BackendIter, BackendSelection},
+    },
+    prelude::HttpPeer,
     proxy::{ProxyHttp, Session},
 };
 
-pub struct LB {
-    pub backends: Arc<LoadBalancer<RoundRobin>>,
+pub struct LB<Algorithm> {
+    pub backends: Arc<LoadBalancer<Algorithm>>,
 }
 
 #[async_trait]
-impl ProxyHttp for LB {
+impl<A> ProxyHttp for LB<A>
+where
+    A: BackendSelection + 'static + Send + Sync,
+    A::Iter: BackendIter,
+{
     type CTX = ();
     fn new_ctx(&self) -> Self::CTX {}
 

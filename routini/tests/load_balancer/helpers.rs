@@ -1,14 +1,21 @@
+use std::marker::PhantomData;
+
+use pingora::lb::selection::{BackendIter, BackendSelection};
 use routini::application::Application;
 use tokio::net::TcpListener;
 
-#[derive(Clone)]
-pub struct TestApp {
+pub struct TestApp<A> {
     pub server_address: String,
     pub backend_addresses: Vec<String>,
     pub http_client: reqwest::Client,
+    _selection_algorithm: PhantomData<A>,
 }
 
-impl TestApp {
+impl<A> TestApp<A>
+where
+    A: BackendSelection + 'static + Send + Sync,
+    A::Iter: BackendIter,
+{
     pub async fn new() -> Self {
         let listener =
             std::net::TcpListener::bind("127.0.0.1:0").expect("Failed to establish listener");
@@ -37,7 +44,7 @@ impl TestApp {
 
         let backend_addr_clone = backend_addresses.clone();
         std::thread::spawn(move || {
-            Application::new(listener, backend_addr_clone).run();
+            Application::<A>::new(listener, backend_addr_clone).run();
         });
 
         let http_client = reqwest::Client::builder()
@@ -48,6 +55,7 @@ impl TestApp {
             server_address,
             backend_addresses,
             http_client,
+            _selection_algorithm: PhantomData,
         }
     }
 

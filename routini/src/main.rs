@@ -1,3 +1,4 @@
+use pingora::prelude::RoundRobin;
 use routini::application::Application;
 use std::net::TcpListener;
 
@@ -9,5 +10,5 @@ fn main() {
         "127.0.0.1:4002".to_owned(),
     ];
 
-    Application::new(listener, backends).run();
+    Application::<RoundRobin>::new(listener, backends).run();
 }

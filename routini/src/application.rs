@@ -1,7 +1,10 @@
-use std::net::TcpListener;
+use std::{marker::PhantomData, net::TcpListener};
 
 use pingora::{
-    lb::LoadBalancer,
+    lb::{
+        LoadBalancer,
+        selection::{BackendIter, BackendSelection},
+    },
     prelude::{TcpHealthCheck, background_service},
     proxy::http_proxy_service,
     server::Server,
@@ -9,11 +12,20 @@ use pingora::{
 
 use crate::load_balancer::LB;
 
-pub struct Application {
+pub struct Application<A>
+where
+    A: BackendSelection + 'static + Send + Sync,
+    A::Iter: BackendIter,
+{
     server: Server,
+    _selection_algorithm: PhantomData<A>,
 }
 
-impl Application {
+impl<A> Application<A>
+where
+    A: BackendSelection + 'static + Send + Sync,
+    A::Iter: BackendIter,
+{
     //TODO: Make the new function take listeners instead of address strings, need to create the backends manually
     // It takes a listener instead of address string to be able to determine random port before creating the Application
     // for testing purposes
@@ -21,7 +33,7 @@ impl Application {
         let mut server = Server::new(None).unwrap();
         server.bootstrap();
 
-        let mut upstreams = LoadBalancer::try_from_iter(backends).unwrap();
+        let mut upstreams = LoadBalancer::<A>::try_from_iter(backends).unwrap();
 
         let hc = TcpHealthCheck::new();
         upstreams.set_health_check(hc);
@@ -46,7 +58,10 @@ impl Application {
         server.add_service(lb_service);
         server.add_service(background);
 
-        Self { server }
+        Self {
+            server,
+            _selection_algorithm: PhantomData,
+        }
     }
 
     pub fn run(self) {

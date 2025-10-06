@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
 use crate::helpers::TestApp;
+use pingora::prelude::RoundRobin;
 use reqwest::StatusCode;
 use tokio::sync::Mutex;
 
 #[tokio::test]
 async fn should_distribute_requests_evenly_among_backends() {
-    let app = TestApp::new().await;
+    let app = TestApp::<RoundRobin>::new().await;
     let connections_pr_worker: usize = 200;
     let mut connections = vec![0; app.backend_addresses.len()];
 
@@ -33,7 +34,7 @@ async fn should_distribute_requests_evenly_among_backends() {
 
 #[tokio::test]
 async fn should_distribute_requests_evenly_with_concurrent_requests() {
-    let app = TestApp::new().await;
+    let app = Arc::new(TestApp::<RoundRobin>::new().await);
     let connections_pr_worker: usize = 1000;
     let connections = Arc::new(Mutex::new(vec![0; app.backend_addresses.len()]));
 
