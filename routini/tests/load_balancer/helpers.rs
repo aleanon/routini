@@ -27,7 +27,6 @@ impl TestApp {
                 .expect("Failed to establish backend listener"),
         ];
 
-        //Take ownership of the listeners so they are dropped here, to free the ports for the application
         let backend_addresses = backend_listeners
             .iter()
             .map(|l| l.local_addr().unwrap().to_string())

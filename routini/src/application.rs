@@ -15,6 +15,8 @@ pub struct Application {
 
 impl Application {
     //TODO: Make the new function take listeners instead of address strings, need to create the backends manually
+    // It takes a listener instead of address string to be able to determine random port before creating the Application
+    // for testing purposes
     pub fn new(listener: TcpListener, backends: impl IntoIterator<Item = String>) -> Self {
         let mut server = Server::new(None).unwrap();
         server.bootstrap();
@@ -36,10 +38,10 @@ impl Application {
 
         let socket_addr = listener
             .local_addr()
-            .expect("Failed to get address from listener");
-        let addr = socket_addr.ip();
-        let port = socket_addr.port();
-        lb_service.add_tcp(&format!("{}:{}", addr, port));
+            .expect("Failed to get address from listener")
+            .to_string();
+
+        lb_service.add_tcp(&socket_addr);
 
         server.add_service(lb_service);
         server.add_service(background);

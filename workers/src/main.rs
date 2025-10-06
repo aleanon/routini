@@ -1,4 +1,4 @@
-use worker::Workers;
+use workers::Workers;
 
 #[tokio::main]
 async fn main() {

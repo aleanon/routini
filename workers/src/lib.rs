@@ -35,13 +35,11 @@ async fn work(State(address): State<String>) -> StatusCode {
 pub struct Workers;
 
 impl Workers {
-    pub async fn run(worker_addresses: impl IntoIterator<Item = TcpListener>) {
+    pub async fn run(address_listeners: impl IntoIterator<Item = TcpListener>) {
         let mut workers = Vec::new();
-        for listener in worker_addresses {
-            let socket_address = listener.local_addr().unwrap();
-            let ip = socket_address.ip();
-            let port = socket_address.port();
-            let address = format!("{}:{}", ip, port);
+
+        for listener in address_listeners {
+            let address = listener.local_addr().unwrap().to_string();
 
             let app = Router::new()
                 .route("/", get(test_page))
