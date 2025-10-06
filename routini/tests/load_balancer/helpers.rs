@@ -1,6 +1,7 @@
 use routini::application::Application;
 use tokio::net::TcpListener;
 
+#[derive(Clone)]
 pub struct TestApp {
     pub server_address: String,
     pub backend_addresses: Vec<String>,
@@ -14,7 +15,6 @@ impl TestApp {
         let port = listener.local_addr().unwrap().port();
         let server_address = format!("http://127.0.0.1:{}", port);
 
-        // Creates the listeners so the operating system can assign random available ports
         let backend_listeners = vec![
             TcpListener::bind("127.0.0.1:0")
                 .await
@@ -33,7 +33,7 @@ impl TestApp {
             .collect::<Vec<_>>();
 
         tokio::spawn(async move {
-            worker::Workers::run(backend_listeners).await;
+            workers::Workers::run(backend_listeners).await;
         });
 
         let backend_addr_clone = backend_addresses.clone();
