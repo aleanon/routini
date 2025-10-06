@@ -1,4 +1,6 @@
-use axum::{Router, extract::State, response::Html, routing::get};
+use std::time::Duration;
+
+use axum::{Router, extract::State, http::StatusCode, response::Html, routing::get};
 
 async fn test_page(State(address): State<String>) -> Html<&'static str> {
     println!("GET request received on {}", address);
@@ -18,6 +20,15 @@ async fn test_page(State(address): State<String>) -> Html<&'static str> {
     )
 }
 
+async fn health() -> StatusCode {
+    StatusCode::OK
+}
+
+async fn work() -> StatusCode {
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    StatusCode::OK
+}
+
 #[tokio::main]
 async fn main() {
     let mut listeners = Vec::new();
@@ -31,6 +42,8 @@ async fn main() {
     for (addr, listener) in listeners {
         let app = Router::new()
             .route("/", get(test_page))
+            .route("/health", get(health))
+            .route("/work", get(work))
             .with_state(addr.clone());
 
         let server = tokio::task::spawn(async move {
