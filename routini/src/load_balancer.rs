@@ -44,7 +44,7 @@ where
                 retry: RetryType::Decided(true),
             })?;
 
-        let peer = Box::new(HttpPeer::new(upstream, false, "".to_string()));
+        let peer = Box::new(HttpPeer::new(upstream, false, String::new()));
         Ok(peer)
     }
 }
