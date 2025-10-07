@@ -30,10 +30,11 @@ where
     // It takes a listener instead of address string to be able to determine random port before creating the Application
     // for testing purposes
     pub fn new(listener: TcpListener, backends: impl IntoIterator<Item = String>) -> Self {
-        let mut server = Server::new(None).unwrap();
+        let mut server = Server::new(None).expect("Failed to create server");
         server.bootstrap();
 
-        let mut upstreams = LoadBalancer::<A>::try_from_iter(backends).unwrap();
+        let mut upstreams = LoadBalancer::<A>::try_from_iter(backends)
+            .expect("Failed to create backends from addresses");
 
         let hc = TcpHealthCheck::new();
         upstreams.set_health_check(hc);
