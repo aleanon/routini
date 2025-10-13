@@ -3,4 +3,30 @@ name = "routini"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "routini"
+path = "src/main.rs"
+
 [dependencies]
+async-trait = "0.1.89"
+pingora = { version = "0.6.0", features = [
+    "lb",
+    "pingora-proxy",
+    "pingora-load-balancing",
+    "pingora-cache",
+] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = [
+    "env-filter",
+    "registry",
+] }
+tracing-error = "0.2.1"
+
+
+[dev-dependencies]
+tokio = { version = "1.47.1", features = ["full"] }
+workers = { path = "../workers" }
+reqwest = { version = "0.12.23", features = ["json"] }
