@@ -21,19 +21,20 @@ where
     _selection_algorithm: PhantomData<SelectionStrategy>,
 }
 
-impl<A> Application<A>
+impl<SelectionStrategy> Application<SelectionStrategy>
 where
-    A: BackendSelection + 'static + Send + Sync,
-    A::Iter: BackendIter,
+    SelectionStrategy: BackendSelection + 'static + Send + Sync,
+    SelectionStrategy::Iter: BackendIter,
 {
-    //TODO: Make the new function take listeners instead of address strings, need to create the backends manually
+    //TODO: Make the new function take listeners instead of address strings, need to create the backends manually.
+
     // It takes a listener instead of address string to be able to determine random port before creating the Application
     // for testing purposes
     pub fn new(listener: TcpListener, backends: impl IntoIterator<Item = String>) -> Self {
         let mut server = Server::new(None).expect("Failed to create server");
         server.bootstrap();
 
-        let mut upstreams = LoadBalancer::<A>::try_from_iter(backends)
+        let mut upstreams = LoadBalancer::<SelectionStrategy>::try_from_iter(backends)
             .expect("Failed to create backends from addresses");
 
         let hc = TcpHealthCheck::new();
