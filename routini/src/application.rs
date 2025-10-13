@@ -12,13 +12,13 @@ use pingora::{
 
 use crate::load_balancer::LB;
 
-pub struct Application<A>
+pub struct Application<SelectionStrategy>
 where
-    A: BackendSelection + 'static + Send + Sync,
-    A::Iter: BackendIter,
+    SelectionStrategy: BackendSelection + 'static + Send + Sync,
+    SelectionStrategy::Iter: BackendIter,
 {
     server: Server,
-    _selection_algorithm: PhantomData<A>,
+    _selection_algorithm: PhantomData<SelectionStrategy>,
 }
 
 impl<A> Application<A>
