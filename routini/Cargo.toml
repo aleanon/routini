@@ -19,12 +19,17 @@ pingora = { version = "0.6.0", features = [
     "pingora-load-balancing",
     "pingora-cache",
 ] }
+pingora-runtime = "0.6.0"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = [
     "env-filter",
     "registry",
 ] }
 tracing-error = "0.2.1"
+arc-swap = "1.7.1"
+log = "0.4.28"
+futures = "0.3.31"
+smallvec = "1.15.1"
 
 
 [dev-dependencies]

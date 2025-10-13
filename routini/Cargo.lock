@@ -1907,8 +1907,12 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "async-trait",
+ "futures",
+ "log",
  "pingora",
+ "pingora-runtime",
  "reqwest",
+ "smallvec",
  "tokio",
  "tracing",
  "tracing-error",
