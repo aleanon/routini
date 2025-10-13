@@ -1,3 +1,4 @@
 pub mod application;
+pub mod least_connections;
 pub mod load_balancer;
 pub mod utils;
