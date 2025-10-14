@@ -1,6 +1,5 @@
 use std::sync::atomic::Ordering;
 
-use log::info;
 use pingora::{protocols::l4::socket::SocketAddr, upstreams::peer::Tracing};
 
 use crate::least_connections::CONNECTIONS;
@@ -14,7 +13,7 @@ impl Tracing for ConnectionsTracer {
             .load()
             .get(&self.0)
             .and_then(|(_, count)| Some(count.fetch_add(1, Ordering::Relaxed)));
-        info!("incremented connection {}", &self.0)
+        log::debug!("incremented connection {}", &self.0)
     }
 
     fn on_disconnected(&self) {
@@ -22,7 +21,7 @@ impl Tracing for ConnectionsTracer {
             .load()
             .get(&self.0)
             .and_then(|(_, count)| Some(count.fetch_sub(1, Ordering::Relaxed)));
-        info!("decremented connection {}", &self.0);
+        log::debug!("decremented connection {}", &self.0);
     }
 
     fn boxed_clone(&self) -> Box<dyn Tracing> {
