@@ -10,8 +10,11 @@ use pingora::{
     },
     prelude::HttpPeer,
     proxy::{ProxyHttp, Session},
+    upstreams::peer::Tracer,
 };
 use tracing::instrument;
+
+use crate::connections_tracer::ConnectionsTracer;
 
 // DEFAULT_MAX_ALGORITHM_ITERATIONS is there to bound the search time for the next Backend. In certain algorithm like Ketama hashing, the search for the next backend is linear and could take a lot of steps.
 pub const DEFAULT_MAX_ALGORITHM_ITERATIONS: usize = 256;
@@ -126,7 +129,9 @@ impl ProxyHttp for MultiLoadBalancer {
             retry: RetryType::Decided(true),
         })?;
 
-        let peer = Box::new(HttpPeer::new(upstream, false, String::new()));
+        let tracer = Tracer(Box::new(ConnectionsTracer(upstream.addr.clone())));
+        let mut peer = Box::new(HttpPeer::new(upstream, false, String::new()));
+        peer.options.tracer = Some(tracer);
         Ok(peer)
     }
 }
