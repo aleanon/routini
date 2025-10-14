@@ -12,7 +12,6 @@ path = "src/main.rs"
 
 [dependencies]
 async-trait = "0.1.89"
-arc-swap = "1.7.1"
 pingora = { version = "0.6.0", features = [
     "lb",
     "pingora-proxy",

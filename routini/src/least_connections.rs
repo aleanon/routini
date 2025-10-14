@@ -1,11 +1,12 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
-        Arc,
+        Arc, LazyLock,
         atomic::{AtomicUsize, Ordering},
     },
 };
 
+use arc_swap::ArcSwap;
 use pingora::{
     lb::{
         Backend,
@@ -15,9 +16,13 @@ use pingora::{
 };
 use smallvec::SmallVec;
 
+/// The usize represents the backend index in the backends array.
+/// the AtomicUsize represents the number of connections to the backend.
+pub static CONNECTIONS: LazyLock<ArcSwap<BTreeMap<SocketAddr, (usize, Arc<AtomicUsize>)>>> =
+    LazyLock::new(|| ArcSwap::new(Arc::new(BTreeMap::new())));
+
 pub struct LeastConnections {
     backends: Box<[Backend]>,
-    connections: BTreeMap<SocketAddr, (usize, Arc<AtomicUsize>)>,
 }
 
 impl LeastConnections {
@@ -26,17 +31,25 @@ impl LeastConnections {
         Self::from_backends(backends)
     }
 
+    // The pingora buildt in load balancer assumes stateless backend selection, The backend selection
+    // is rebuilt every time update is called on the load balancer, this would cause connections to reset.
+    // This is why a static is used here instead of holding the connections in the LeastConnections struct.
     pub fn from_backends(backends: Box<[Backend]>) -> Self {
-        let connections = backends
-            .iter()
-            .enumerate()
-            .map(|(i, b)| (b.addr.clone(), (i, Arc::new(AtomicUsize::new(0)))))
-            .collect();
+        let connections = {
+            let existing_connections = CONNECTIONS.load();
+            backends
+                .iter()
+                .enumerate()
+                .map(|(i, b)| match existing_connections.get(&b.addr) {
+                    Some((_, conn_count)) => (b.addr.clone(), (i, conn_count.clone())),
+                    None => (b.addr.clone(), (i, Arc::new(AtomicUsize::new(0)))),
+                })
+                .collect()
+        };
 
-        LeastConnections {
-            backends,
-            connections,
-        }
+        CONNECTIONS.store(Arc::new(connections));
+
+        LeastConnections { backends }
     }
 }
 
@@ -71,7 +84,7 @@ impl LeastConnectionsIter {
 
 impl BackendIter for LeastConnectionsIter {
     fn next(&mut self) -> Option<&Backend> {
-        let conns = &self.least_connections.connections;
+        let conns = CONNECTIONS.load();
         let mut min_count = usize::MAX;
         let mut min_index = None;
 
@@ -106,8 +119,8 @@ mod tests {
             return None;
         };
 
-        least_connections
-            .connections
+        CONNECTIONS
+            .load()
             .get(&backend)
             .unwrap()
             .1
@@ -128,7 +141,8 @@ mod tests {
 
         let least_connections = Arc::new(LeastConnections::new(&backends));
         backends.iter().enumerate().for_each(|(i, b)| {
-            let connections = least_connections.connections.get(&b.addr).unwrap();
+            let map = CONNECTIONS.load();
+            let connections = map.get(&b.addr).unwrap();
             connections.1.store(i, Ordering::Relaxed);
         });
 
