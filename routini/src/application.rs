@@ -1,54 +1,92 @@
-use std::{marker::PhantomData, net::TcpListener};
+use std::{collections::HashMap, net::TcpListener, sync::Arc, time::Duration};
 
 use pingora::{
     lb::{
         LoadBalancer,
-        selection::{BackendIter, BackendSelection},
+        selection::{BackendIter, BackendSelection, Random, RoundRobin},
     },
     prelude::{TcpHealthCheck, background_service},
     proxy::http_proxy_service,
     server::Server,
 };
 
-use crate::load_balancer::LB;
+use crate::load_balancer::{
+    DEFAULT_MAX_ALGORITHM_ITERATIONS, DynLoadBalancer, MultiLoadBalancer, MultiLoadBalancerHandle,
+    RoutingConfig, StrategyId,
+};
 
-pub struct Application<SelectionStrategy>
-where
-    SelectionStrategy: BackendSelection + 'static + Send + Sync,
-    SelectionStrategy::Iter: BackendIter,
-{
+pub struct Application {
     server: Server,
-    _selection_algorithm: PhantomData<SelectionStrategy>,
+    router_handle: MultiLoadBalancerHandle,
 }
 
-impl<SelectionStrategy> Application<SelectionStrategy>
-where
-    SelectionStrategy: BackendSelection + 'static + Send + Sync,
-    SelectionStrategy::Iter: BackendIter,
-{
+pub enum StrategyKind {
+    RoundRobin,
+    Random,
+}
+
+pub struct StrategyConfig {
+    pub id: StrategyId,
+    pub kind: StrategyKind,
+}
+
+impl StrategyConfig {
+    pub fn new(id: impl Into<StrategyId>, kind: StrategyKind) -> Self {
+        Self {
+            id: id.into(),
+            kind,
+        }
+    }
+}
+
+impl Application {
     //TODO: Make the new function take listeners instead of address strings, need to create the backends manually.
 
     // It takes a listener instead of address string to be able to determine random port before creating the Application
     // for testing purposes
-    pub fn new(listener: TcpListener, backends: impl IntoIterator<Item = String>) -> Self {
+    pub fn new(
+        listener: TcpListener,
+        backends: impl IntoIterator<Item = String>,
+        strategies: Vec<StrategyConfig>,
+        initial_routing: RoutingConfig,
+    ) -> Self {
+        assert!(
+            !strategies.is_empty(),
+            "At least one strategy must be configured"
+        );
+
+        let backends: Vec<String> = backends.into_iter().collect();
         let mut server = Server::new(None).expect("Failed to create server");
         server.bootstrap();
 
-        let mut upstreams = LoadBalancer::<SelectionStrategy>::try_from_iter(backends)
-            .expect("Failed to create backends from addresses");
+        let mut strategy_map: HashMap<StrategyId, Arc<dyn DynLoadBalancer>> = HashMap::new();
 
-        let hc = TcpHealthCheck::new();
-        upstreams.set_health_check(hc);
-        upstreams.health_check_frequency = Some(std::time::Duration::from_secs(1));
+        for StrategyConfig { id, kind } in strategies {
+            let handle = match kind {
+                StrategyKind::RoundRobin => {
+                    register_strategy::<RoundRobin>(&mut server, &backends, &id, "round_robin")
+                }
+                StrategyKind::Random => {
+                    register_strategy::<Random>(&mut server, &backends, &id, "random")
+                }
+            };
 
-        let background = background_service("health check", upstreams);
-        let upstreams = background.task();
+            let existing = strategy_map.insert(id.clone(), handle);
+            assert!(existing.is_none(), "duplicate strategy id: {id}");
+        }
 
-        let lb = LB {
-            backends: upstreams,
-        };
+        assert!(
+            strategy_map.contains_key(initial_routing.strategy()),
+            "initial routing default must exist in strategies"
+        );
 
-        let mut lb_service = http_proxy_service(&server.configuration, lb);
+        let router = MultiLoadBalancer::new(
+            strategy_map,
+            initial_routing,
+            DEFAULT_MAX_ALGORITHM_ITERATIONS,
+        );
+        let handle = router.handle();
+        let mut lb_service = http_proxy_service(&server.configuration, router);
 
         let socket_addr = listener
             .local_addr()
@@ -58,15 +96,42 @@ where
         lb_service.add_tcp(&socket_addr);
 
         server.add_service(lb_service);
-        server.add_service(background);
 
         Self {
             server,
-            _selection_algorithm: PhantomData,
+            router_handle: handle,
         }
+    }
+
+    pub fn control(&self) -> MultiLoadBalancerHandle {
+        self.router_handle.clone()
     }
 
     pub fn run(self) {
         self.server.run_forever()
     }
+}
+
+fn register_strategy<S>(
+    server: &mut Server,
+    backends: &[String],
+    id: &str,
+    name: &str,
+) -> Arc<dyn DynLoadBalancer>
+where
+    S: BackendSelection + Send + Sync + 'static,
+    S::Iter: BackendIter,
+{
+    let mut lb = LoadBalancer::<S>::try_from_iter(backends.to_vec())
+        .expect("Failed to create backends from addresses");
+
+    let hc = TcpHealthCheck::new();
+    lb.set_health_check(hc);
+    lb.health_check_frequency = Some(Duration::from_secs(1));
+
+    let background = background_service(&format!("health check ({}:{})", name, id), lb);
+    let handle = background.task();
+    server.add_service(background);
+
+    handle as Arc<dyn DynLoadBalancer>
 }

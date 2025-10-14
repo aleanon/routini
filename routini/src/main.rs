@@ -1,5 +1,8 @@
-use pingora::prelude::RoundRobin;
-use routini::{application::Application, utils::tracing::init_tracing};
+use routini::{
+    application::{Application, StrategyConfig, StrategyKind},
+    load_balancer::RoutingConfig,
+    utils::tracing::init_tracing,
+};
 use std::net::TcpListener;
 
 fn main() {
@@ -12,5 +15,13 @@ fn main() {
         "127.0.0.1:4002".to_owned(),
     ];
 
-    Application::<RoundRobin>::new(listener, backends).run();
+    let strategies = vec![
+        StrategyConfig::new("round_robin", StrategyKind::RoundRobin),
+        StrategyConfig::new("random", StrategyKind::Random),
+    ];
+
+    let routing = RoutingConfig::new("round_robin");
+
+    let app = Application::new(listener, backends, strategies, routing);
+    app.run();
 }

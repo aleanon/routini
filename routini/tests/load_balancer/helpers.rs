@@ -1,42 +1,31 @@
-use std::marker::PhantomData;
+use std::io;
 
-use pingora::lb::selection::{BackendIter, BackendSelection};
-use routini::application::Application;
+use routini::{
+    application::{Application, StrategyConfig, StrategyKind},
+    load_balancer::RoutingConfig,
+};
 use tokio::net::TcpListener;
 
-pub struct TestApp<A> {
+pub struct TestApp {
     pub server_address: String,
     pub backend_addresses: Vec<String>,
     pub http_client: reqwest::Client,
-    _selection_algorithm: PhantomData<A>,
 }
 
-impl<A> TestApp<A>
-where
-    A: BackendSelection + 'static + Send + Sync,
-    A::Iter: BackendIter,
-{
-    pub async fn new() -> Self {
-        let listener =
-            std::net::TcpListener::bind("127.0.0.1:0").expect("Failed to establish listener");
-        let server_address = format!("http://{}", listener.local_addr().unwrap());
+impl TestApp {
+    pub async fn new() -> io::Result<Self> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let server_address = format!("http://{}", listener.local_addr()?);
 
-        let backend_listeners = vec![
-            TcpListener::bind("127.0.0.1:0")
-                .await
-                .expect("Failed to establish backend listener"),
-            TcpListener::bind("127.0.0.1:0")
-                .await
-                .expect("Failed to establish backend listener"),
-            TcpListener::bind("127.0.0.1:0")
-                .await
-                .expect("Failed to establish backend listener"),
-        ];
+        let mut backend_listeners = Vec::new();
+        for _ in 0..3 {
+            backend_listeners.push(TcpListener::bind("127.0.0.1:0").await?);
+        }
 
         let backend_addresses = backend_listeners
             .iter()
-            .map(|l| l.local_addr().unwrap().to_string())
-            .collect::<Vec<_>>();
+            .map(|l| l.local_addr().map(|addr| addr.to_string()))
+            .collect::<io::Result<Vec<_>>>()?;
 
         tokio::spawn(async move {
             workers::Workers::run(backend_listeners).await;
@@ -44,19 +33,20 @@ where
 
         let backend_addr_clone = backend_addresses.clone();
         std::thread::spawn(move || {
-            Application::<A>::new(listener, backend_addr_clone).run();
+            let strategies = vec![StrategyConfig::new("round_robin", StrategyKind::RoundRobin)];
+            let routing = RoutingConfig::new("round_robin");
+            Application::new(listener, backend_addr_clone, strategies, routing).run();
         });
 
         let http_client = reqwest::Client::builder()
             .build()
             .expect("Failed to build http client");
 
-        Self {
+        Ok(Self {
             server_address,
             backend_addresses,
             http_client,
-            _selection_algorithm: PhantomData,
-        }
+        })
     }
 
     pub async fn get_health_check(&self) -> reqwest::Response {
