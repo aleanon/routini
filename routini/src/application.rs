@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::TcpListener, sync::Arc, time::Duration};
+use std::{collections::HashMap, fmt::Display, net::TcpListener, sync::Arc, time::Duration};
 
 use pingora::{
     lb::{
@@ -10,9 +10,12 @@ use pingora::{
     server::Server,
 };
 
-use crate::load_balancer::{
-    DEFAULT_MAX_ALGORITHM_ITERATIONS, DynLoadBalancer, MultiLoadBalancer, MultiLoadBalancerHandle,
-    RoutingConfig, StrategyId,
+use crate::{
+    least_connections::LeastConnections,
+    load_balancer::{
+        DEFAULT_MAX_ALGORITHM_ITERATIONS, DynLoadBalancer, MultiLoadBalancer,
+        MultiLoadBalancerHandle, RoutingConfig, StrategyId,
+    },
 };
 
 pub struct Application {
@@ -23,6 +26,17 @@ pub struct Application {
 pub enum StrategyKind {
     RoundRobin,
     Random,
+    LeastConnections,
+}
+
+impl Display for StrategyKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StrategyKind::RoundRobin => write!(f, "round_robin"),
+            StrategyKind::Random => write!(f, "random"),
+            StrategyKind::LeastConnections => write!(f, "least_connections"),
+        }
+    }
 }
 
 pub struct StrategyConfig {
@@ -31,9 +45,9 @@ pub struct StrategyConfig {
 }
 
 impl StrategyConfig {
-    pub fn new(id: impl Into<StrategyId>, kind: StrategyKind) -> Self {
+    pub fn new(kind: StrategyKind) -> Self {
         Self {
-            id: id.into(),
+            id: kind.to_string(),
             kind,
         }
     }
@@ -69,6 +83,12 @@ impl Application {
                 StrategyKind::Random => {
                     register_strategy::<Random>(&mut server, &backends, &id, "random")
                 }
+                StrategyKind::LeastConnections => register_strategy::<LeastConnections>(
+                    &mut server,
+                    &backends,
+                    &id,
+                    "least_connections",
+                ),
             };
 
             let existing = strategy_map.insert(id.clone(), handle);

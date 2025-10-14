@@ -16,11 +16,12 @@ fn main() {
     ];
 
     let strategies = vec![
-        StrategyConfig::new("round_robin", StrategyKind::RoundRobin),
-        StrategyConfig::new("random", StrategyKind::Random),
+        StrategyConfig::new(StrategyKind::RoundRobin),
+        StrategyConfig::new(StrategyKind::Random),
+        StrategyConfig::new(StrategyKind::LeastConnections),
     ];
 
-    let routing = RoutingConfig::new("round_robin");
+    let routing = RoutingConfig::new(StrategyKind::RoundRobin);
 
     let app = Application::new(listener, backends, strategies, routing);
     app.run();
