@@ -7,14 +7,13 @@ use std::{
 };
 
 use arc_swap::ArcSwap;
-use pingora::{
-    lb::{
-        Backend,
-        selection::{BackendIter, BackendSelection},
-    },
-    protocols::l4::socket::SocketAddr,
-};
+use pingora::protocols::l4::socket::SocketAddr;
 use smallvec::SmallVec;
+
+use crate::load_balancing::{
+    Backend,
+    selection::{BackendIter, BackendSelection},
+};
 
 /// The usize represents the backend index in the backends array.
 /// the AtomicUsize represents the number of connections to the backend.
