@@ -12,10 +12,9 @@ use tracing::instrument;
 
 use crate::{
     application::StrategyKind,
-    connections_tracer::ConnectionsTracer,
     load_balancing::{
         Backend, LoadBalancer,
-        selection::{BackendIter, BackendSelection},
+        selection::{BackendIter, BackendSelection, least_connections::ConnectionsTracer},
     },
 };
 

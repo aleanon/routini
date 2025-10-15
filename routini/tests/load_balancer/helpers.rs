@@ -3,7 +3,7 @@ use std::{io, net::Ipv4Addr};
 use fake::{Fake, Faker};
 use routini::{
     application::{Application, StrategyConfig, StrategyKind},
-    load_balancer::RoutingConfig,
+    proxy::RoutingConfig,
 };
 use tokio::net::TcpListener;
 
