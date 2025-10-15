@@ -3,15 +3,15 @@ use std::{collections::HashMap, fmt::Display, net::TcpListener, sync::Arc, time:
 use pingora::{prelude::background_service, proxy::http_proxy_service, server::Server};
 
 use crate::{
-    least_connections::LeastConnections,
-    load_balancer::{
-        DEFAULT_MAX_ALGORITHM_ITERATIONS, DynLoadBalancer, MultiLoadBalancer,
-        MultiLoadBalancerHandle, RoutingConfig, StrategyId,
-    },
     load_balancing::{
         LoadBalancer,
         health_check::TcpHealthCheck,
+        selection::least_connections::LeastConnections,
         selection::{BackendIter, BackendSelection, Random, RoundRobin},
+    },
+    proxy::{
+        DEFAULT_MAX_ALGORITHM_ITERATIONS, DynLoadBalancer, MultiLoadBalancer,
+        MultiLoadBalancerHandle, RoutingConfig, StrategyId,
     },
 };
 

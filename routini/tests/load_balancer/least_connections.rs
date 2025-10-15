@@ -1,7 +1,7 @@
 use crate::helpers::TestApp;
 use reqwest::StatusCode;
 use routini::application::StrategyKind;
-use routini::least_connections::CONNECTIONS;
+use routini::load_balancing::selection::least_connections::CONNECTIONS;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;

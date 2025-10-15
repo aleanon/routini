@@ -1,6 +1,4 @@
 pub mod application;
-pub mod connections_tracer;
-pub mod least_connections;
-pub mod load_balancer;
 pub mod load_balancing;
+pub mod proxy;
 pub mod utils;

@@ -16,6 +16,7 @@
 
 pub mod algorithms;
 pub mod consistent;
+pub mod least_connections;
 pub mod weighted;
 
 use super::Backend;
