@@ -1,6 +1,6 @@
 use routini::{
     application::{Application, StrategyConfig, StrategyKind},
-    load_balancer::RoutingConfig,
+    proxy::RoutingConfig,
     utils::tracing::init_tracing,
 };
 use std::net::TcpListener;
@@ -21,7 +21,7 @@ fn main() {
         StrategyConfig::new(StrategyKind::LeastConnections),
     ];
 
-    let routing = RoutingConfig::new(StrategyKind::RoundRobin);
+    let routing = RoutingConfig::new(StrategyKind::LeastConnections);
 
     let app = Application::new(listener, backends, strategies, routing);
     app.run();
