@@ -31,7 +31,7 @@ impl LeastConnections {
         Self::from_backends(backends)
     }
 
-    // The pingora buildt in load balancer assumes stateless backend selection, The backend selection
+    // The pingora built in load balancer assumes stateless backend selection, The backend selection
     // is rebuilt every time update is called on the load balancer, this would cause connections to reset.
     // This is why a static is used here instead of holding the connections in the LeastConnections struct.
     pub fn from_backends(backends: Box<[Backend]>) -> Self {
@@ -89,7 +89,6 @@ impl BackendIter for LeastConnectionsIter {
         let mut min_index = None;
 
         for (i, count) in conns.values() {
-            // skip already yielded backends
             if self.yielded.contains(i) {
                 continue;
             }
