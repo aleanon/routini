@@ -54,8 +54,6 @@ impl StrategyConfig {
 }
 
 impl Application {
-    //TODO: Make the new function take listeners instead of address strings, need to create the backends manually.
-
     // It takes a listener instead of address string to be able to determine random port before creating the Application
     // for testing purposes
     pub fn new(
