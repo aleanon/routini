@@ -4,17 +4,20 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use pingora::{
     Error, ErrorSource, ErrorType, ImmutStr, Result, RetryType,
-    lb::{
-        Backend, LoadBalancer,
-        selection::{BackendIter, BackendSelection},
-    },
     prelude::HttpPeer,
     proxy::{ProxyHttp, Session},
     upstreams::peer::Tracer,
 };
 use tracing::instrument;
 
-use crate::{application::StrategyKind, connections_tracer::ConnectionsTracer};
+use crate::{
+    application::StrategyKind,
+    connections_tracer::ConnectionsTracer,
+    load_balancing::{
+        Backend, LoadBalancer,
+        selection::{BackendIter, BackendSelection},
+    },
+};
 
 // DEFAULT_MAX_ALGORITHM_ITERATIONS is there to bound the search time for the next Backend. In certain algorithm like Ketama hashing, the search for the next backend is linear and could take a lot of steps.
 pub const DEFAULT_MAX_ALGORITHM_ITERATIONS: usize = 256;

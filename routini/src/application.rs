@@ -1,20 +1,17 @@
 use std::{collections::HashMap, fmt::Display, net::TcpListener, sync::Arc, time::Duration};
 
-use pingora::{
-    lb::{
-        LoadBalancer,
-        selection::{BackendIter, BackendSelection, Random, RoundRobin},
-    },
-    prelude::{TcpHealthCheck, background_service},
-    proxy::http_proxy_service,
-    server::Server,
-};
+use pingora::{prelude::background_service, proxy::http_proxy_service, server::Server};
 
 use crate::{
     least_connections::LeastConnections,
     load_balancer::{
         DEFAULT_MAX_ALGORITHM_ITERATIONS, DynLoadBalancer, MultiLoadBalancer,
         MultiLoadBalancerHandle, RoutingConfig, StrategyId,
+    },
+    load_balancing::{
+        LoadBalancer,
+        health_check::TcpHealthCheck,
+        selection::{BackendIter, BackendSelection, Random, RoundRobin},
     },
 };
 
