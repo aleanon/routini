@@ -37,11 +37,12 @@ where
 }
 
 /// Round Robin selection
-pub struct RoundRobin(AtomicUsize);
+#[derive(Clone)]
+pub struct RoundRobin(Arc<AtomicUsize>);
 
 impl SelectionAlgorithm for RoundRobin {
     fn new() -> Self {
-        Self(AtomicUsize::new(0))
+        Self(Arc::new(AtomicUsize::new(0)))
     }
     fn next(&self, _key: &[u8]) -> u64 {
         self.0.fetch_add(1, Ordering::Relaxed) as u64
@@ -49,8 +50,8 @@ impl SelectionAlgorithm for RoundRobin {
 }
 
 /// Random selection
+#[derive(Clone)]
 pub struct Random;
-
 impl SelectionAlgorithm for Random {
     fn new() -> Self {
         Self

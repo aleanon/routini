@@ -22,6 +22,7 @@ use std::sync::Arc;
 /// Weighted selection with a given selection algorithm
 ///
 /// The default algorithm is [FnvHasher]. See [super::algorithms] for more choices.
+#[derive(Debug, Clone)]
 pub struct Weighted<H = FnvHasher> {
     backends: Box<[Backend]>,
     // each item is an index to the `backends`, use u16 to save memory, support up to 2^16 backends
@@ -102,6 +103,7 @@ impl<H: SelectionAlgorithm> BackendIter for WeightedIterator<H> {
 
 #[cfg(test)]
 mod test {
+
     use super::super::algorithms::*;
     use super::*;
     use std::collections::HashMap;
