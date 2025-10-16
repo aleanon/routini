@@ -15,9 +15,10 @@ use crate::load_balancing::{
     selection::{BackendIter, BackendSelection},
 };
 
-/// The usize represents the backend index in the backends array.
-/// the AtomicUsize represents the number of connections to the backend.
-pub static CONNECTIONS: LazyLock<ArcSwap<BTreeMap<SocketAddr, (usize, Arc<AtomicUsize>)>>> =
+type BackendIndex = usize;
+type ConnectionCount = Arc<AtomicUsize>;
+
+pub static CONNECTIONS: LazyLock<ArcSwap<BTreeMap<SocketAddr, (BackendIndex, ConnectionCount)>>> =
     LazyLock::new(|| ArcSwap::new(Arc::new(BTreeMap::new())));
 
 pub struct LeastConnections {
