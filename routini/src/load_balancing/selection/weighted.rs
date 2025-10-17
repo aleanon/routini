@@ -14,23 +14,47 @@
 
 //! Weighted Selection
 
+use crate::load_balancing::selection::SelectorBuilder;
+
 use super::{Backend, BackendIter, BackendSelection, SelectionAlgorithm};
 use fnv::FnvHasher;
 use std::collections::BTreeSet;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 /// Weighted selection with a given selection algorithm
 ///
 /// The default algorithm is [FnvHasher]. See [super::algorithms] for more choices.
-#[derive(Debug, Clone)]
-pub struct Weighted<H = FnvHasher> {
+pub struct WeightedSelector<H = FnvHasher> {
     backends: Box<[Backend]>,
     // each item is an index to the `backends`, use u16 to save memory, support up to 2^16 backends
     weighted: Box<[u16]>,
     algorithm: H,
 }
 
-impl<H: SelectionAlgorithm> BackendSelection for Weighted<H> {
+pub struct Weighted<H = FnvHasher>(PhantomData<H>);
+
+impl<H: SelectionAlgorithm> PartialEq for Weighted<H> {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl<H: SelectionAlgorithm> Default for Weighted<H> {
+    fn default() -> Self {
+        Weighted(PhantomData)
+    }
+}
+
+impl<H: SelectionAlgorithm> SelectorBuilder for Weighted<H> {
+    type Selector = WeightedSelector<H>;
+
+    fn build_selector(&self, backends: &BTreeSet<Backend>) -> Self::Selector {
+        <Self::Selector as BackendSelection>::build(backends)
+    }
+}
+
+impl<H: SelectionAlgorithm> BackendSelection for WeightedSelector<H> {
     type Iter = WeightedIterator<H>;
 
     fn build(backends: &BTreeSet<Backend>) -> Self {
@@ -45,7 +69,7 @@ impl<H: SelectionAlgorithm> BackendSelection for Weighted<H> {
                 weighted.push(index as u16);
             }
         }
-        Weighted {
+        WeightedSelector {
             backends,
             weighted: weighted.into_boxed_slice(),
             algorithm: H::new(),
@@ -63,13 +87,13 @@ impl<H: SelectionAlgorithm> BackendSelection for Weighted<H> {
 pub struct WeightedIterator<H> {
     // the unbounded index seed
     index: u64,
-    backend: Arc<Weighted<H>>,
+    backend: Arc<WeightedSelector<H>>,
     first: bool,
 }
 
 impl<H: SelectionAlgorithm> WeightedIterator<H> {
     /// Constructs a new [WeightedIterator].
-    fn new(input: &[u8], backend: Arc<Weighted<H>>) -> Self {
+    fn new(input: &[u8], backend: Arc<WeightedSelector<H>>) -> Self {
         Self {
             index: backend.algorithm.next(input),
             backend,
@@ -103,7 +127,6 @@ impl<H: SelectionAlgorithm> BackendIter for WeightedIterator<H> {
 
 #[cfg(test)]
 mod test {
-
     use super::super::algorithms::*;
     use super::*;
     use std::collections::HashMap;
@@ -115,7 +138,7 @@ mod test {
         b2.weight = 10; // 10x than the rest
         let b3 = Backend::new("1.0.0.255:80").unwrap();
         let backends = BTreeSet::from_iter([b1.clone(), b2.clone(), b3.clone()]);
-        let hash: Arc<Weighted> = Arc::new(Weighted::build(&backends));
+        let hash: Arc<WeightedSelector> = Arc::new(WeightedSelector::build(&backends));
 
         // same hash iter over
         let mut iter = hash.iter(b"test");
@@ -159,7 +182,7 @@ mod test {
         // sorted with: [b2, b3, b1]
         // weighted: [0, 0, 0, 0, 0, 0, 0, 0, 1, 2]
         let backends = BTreeSet::from_iter([b1.clone(), b2.clone(), b3.clone()]);
-        let hash: Arc<Weighted<RoundRobin>> = Arc::new(Weighted::build(&backends));
+        let hash: Arc<WeightedSelector<RoundRobin>> = Arc::new(WeightedSelector::build(&backends));
 
         // same hash iter over
         let mut iter = hash.iter(b"test");
@@ -201,7 +224,7 @@ mod test {
         b2.weight = 8; // 8x than the rest
         let b3 = Backend::new("1.0.0.255:80").unwrap();
         let backends = BTreeSet::from_iter([b1.clone(), b2.clone(), b3.clone()]);
-        let hash: Arc<Weighted<Random>> = Arc::new(Weighted::build(&backends));
+        let hash: Arc<WeightedSelector<Random>> = Arc::new(WeightedSelector::build(&backends));
 
         let mut count = HashMap::new();
         count.insert(b1.clone(), 0);
