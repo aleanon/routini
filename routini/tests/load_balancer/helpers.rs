@@ -1,8 +1,9 @@
-use std::io;
+use std::{io, net::Ipv4Addr};
 
+use fake::{Fake, Faker};
 use routini::{
-    application::{Application, StrategyConfig, StrategyKind},
-    load_balancer::RoutingConfig,
+    application::Application,
+    load_balancing::selection::{BackendIter, BackendSelection, Strategy},
 };
 use tokio::net::TcpListener;
 
@@ -13,7 +14,12 @@ pub struct TestApp {
 }
 
 impl TestApp {
-    pub async fn new() -> io::Result<Self> {
+    pub async fn new<S>(selection_strategy: S) -> io::Result<Self>
+    where
+        S: Strategy + 'static,
+        S::Selector: BackendSelection + Send + Sync,
+        <S::Selector as BackendSelection>::Iter: BackendIter,
+    {
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         let server_address = format!("http://{}", listener.local_addr()?);
 
@@ -33,9 +39,7 @@ impl TestApp {
 
         let backend_addr_clone = backend_addresses.clone();
         std::thread::spawn(move || {
-            let strategies = vec![StrategyConfig::new("round_robin", StrategyKind::RoundRobin)];
-            let routing = RoutingConfig::new("round_robin");
-            Application::new(listener, backend_addr_clone, strategies, routing).run();
+            Application::new(listener, backend_addr_clone, selection_strategy).run();
         });
 
         let http_client = reqwest::Client::builder()
@@ -50,8 +54,11 @@ impl TestApp {
     }
 
     pub async fn get_health_check(&self) -> reqwest::Response {
+        let ip: Ipv4Addr = Faker.fake();
+
         self.http_client
             .get(format!("{}{}", self.server_address, "/health"))
+            .header("x-forwarded-for", ip.to_string())
             .send()
             .await
             .expect("Failed to send health check request")

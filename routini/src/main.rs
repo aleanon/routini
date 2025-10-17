@@ -1,6 +1,5 @@
 use routini::{
-    application::{Application, StrategyConfig, StrategyKind},
-    load_balancer::RoutingConfig,
+    application::Application, load_balancing::selection::adaptive::Adaptive,
     utils::tracing::init_tracing,
 };
 use std::net::TcpListener;
@@ -15,13 +14,6 @@ fn main() {
         "127.0.0.1:4002".to_owned(),
     ];
 
-    let strategies = vec![
-        StrategyConfig::new("round_robin", StrategyKind::RoundRobin),
-        StrategyConfig::new("random", StrategyKind::Random),
-    ];
-
-    let routing = RoutingConfig::new("round_robin");
-
-    let app = Application::new(listener, backends, strategies, routing);
+    let app = Application::new(listener, backends, Adaptive::Consistent);
     app.run();
 }
