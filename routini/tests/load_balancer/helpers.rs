@@ -5,6 +5,7 @@ use routini::{
     application::Application,
     load_balancing::selection::{BackendIter, BackendSelection, Strategy},
 };
+use serde::de::DeserializeOwned;
 use tokio::net::TcpListener;
 
 pub struct TestApp {
@@ -16,7 +17,7 @@ pub struct TestApp {
 impl TestApp {
     pub async fn new<S>(selection_strategy: S) -> io::Result<Self>
     where
-        S: Strategy + 'static,
+        S: Strategy + 'static + DeserializeOwned,
         S::Selector: BackendSelection + Send + Sync,
         <S::Selector as BackendSelection>::Iter: BackendIter,
     {
