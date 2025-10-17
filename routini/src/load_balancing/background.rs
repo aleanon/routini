@@ -16,14 +16,17 @@
 
 use std::time::{Duration, Instant};
 
+use crate::load_balancing::selection::Strategy;
+
 use super::{BackendIter, BackendSelection, LoadBalancer};
 use async_trait::async_trait;
 use pingora::{server::ShutdownWatch, services::background::BackgroundService};
 
 #[async_trait]
-impl<S: Send + Sync + BackendSelection + 'static> BackgroundService for LoadBalancer<S>
+impl<S: Strategy + Send + Sync + 'static> BackgroundService for LoadBalancer<S>
 where
-    S::Iter: BackendIter,
+    S::Selector: BackendSelection + Send + Sync,
+    <S::Selector as BackendSelection>::Iter: BackendIter,
 {
     async fn start(&self, shutdown: ShutdownWatch) -> () {
         // 136 years
