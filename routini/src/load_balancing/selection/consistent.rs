@@ -19,14 +19,25 @@ use pingora::protocols::l4::socket::SocketAddr;
 use pingora_ketama::{Bucket, Continuum};
 use std::collections::HashMap;
 
+#[derive(Default, PartialEq)]
+pub struct KetamaHashing;
+
+impl SelectorBuilder for KetamaHashing {
+    type Selector = KetamaHashingSelector;
+
+    fn build_selector(&self, backends: &BTreeSet<Backend>) -> Self::Selector {
+        <Self::Selector as BackendSelection>::build(backends)
+    }
+}
+
 /// Weighted Ketama consistent hashing
-pub struct KetamaHashing {
+pub struct KetamaHashingSelector {
     ring: Continuum,
     // TODO: update Ketama to just store this
     backends: HashMap<SocketAddr, Backend>,
 }
 
-impl BackendSelection for KetamaHashing {
+impl BackendSelection for KetamaHashingSelector {
     type Iter = OwnedNodeIterator;
 
     fn build(backends: &BTreeSet<Backend>) -> Self {
@@ -45,7 +56,8 @@ impl BackendSelection for KetamaHashing {
             .iter()
             .map(|b| (b.addr.clone(), b.clone()))
             .collect();
-        KetamaHashing {
+
+        KetamaHashingSelector {
             ring: Continuum::new(&buckets),
             backends: new_backends,
         }
@@ -62,7 +74,7 @@ impl BackendSelection for KetamaHashing {
 /// Iterator over a Continuum
 pub struct OwnedNodeIterator {
     idx: usize,
-    ring: Arc<KetamaHashing>,
+    ring: Arc<KetamaHashingSelector>,
 }
 
 impl BackendIter for OwnedNodeIterator {
@@ -84,7 +96,7 @@ mod test {
         let b2 = Backend::new("1.0.0.1:80").unwrap();
         let b3 = Backend::new("1.0.0.255:80").unwrap();
         let backends = BTreeSet::from_iter([b1.clone(), b2.clone(), b3.clone()]);
-        let hash = Arc::new(KetamaHashing::build(&backends));
+        let hash = Arc::new(KetamaHashingSelector::build(&backends));
 
         let mut iter = hash.iter(b"test0");
         assert_eq!(iter.next(), Some(&b2));
@@ -109,7 +121,7 @@ mod test {
 
         // remove b3
         let backends = BTreeSet::from_iter([b1.clone(), b2.clone()]);
-        let hash = Arc::new(KetamaHashing::build(&backends));
+        let hash = Arc::new(KetamaHashingSelector::build(&backends));
         let mut iter = hash.iter(b"test0");
         assert_eq!(iter.next(), Some(&b2));
         let mut iter = hash.iter(b"test1");
