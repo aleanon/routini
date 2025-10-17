@@ -374,6 +374,8 @@ where
         if &strategy == &**self.strategy.load() {
             return;
         }
+
+        self.strategy.store(Arc::new(strategy));
         self.selector.store(Arc::new(
             self.strategy
                 .load()
