@@ -2,8 +2,8 @@ use std::{io, net::Ipv4Addr};
 
 use fake::{Fake, Faker};
 use routini::{
-    application::{Application, StrategyConfig, StrategyKind},
-    proxy::RoutingConfig,
+    application::Application,
+    load_balancing::selection::{BackendIter, BackendSelection, Strategy},
 };
 use tokio::net::TcpListener;
 
@@ -14,7 +14,12 @@ pub struct TestApp {
 }
 
 impl TestApp {
-    pub async fn new(selection_strategy: StrategyKind) -> io::Result<Self> {
+    pub async fn new<S>(selection_strategy: S) -> io::Result<Self>
+    where
+        S: Strategy + 'static,
+        S::Selector: BackendSelection + Send + Sync,
+        <S::Selector as BackendSelection>::Iter: BackendIter,
+    {
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         let server_address = format!("http://{}", listener.local_addr()?);
 
@@ -34,13 +39,7 @@ impl TestApp {
 
         let backend_addr_clone = backend_addresses.clone();
         std::thread::spawn(move || {
-            let strategies = vec![
-                StrategyConfig::new(StrategyKind::RoundRobin),
-                StrategyConfig::new(StrategyKind::Random),
-                StrategyConfig::new(StrategyKind::LeastConnections),
-            ];
-            let routing = RoutingConfig::new(selection_strategy);
-            Application::new(listener, backend_addr_clone, strategies, routing).run();
+            Application::new(listener, backend_addr_clone, selection_strategy).run();
         });
 
         let http_client = reqwest::Client::builder()
