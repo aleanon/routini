@@ -14,15 +14,40 @@
 
 //! Backend selection interfaces and algorithms
 
+pub mod adaptive;
 pub mod algorithms;
 pub mod consistent;
 pub mod least_connections;
 pub mod weighted;
 
+use crate::load_balancing::selection::weighted::WeightedSelector;
+
 use super::Backend;
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 use weighted::Weighted;
+
+/// Super trait for any complete strategy implementation.
+pub trait Strategy: SelectorBuilder + Send + Sync
+where
+    Self::Selector: BackendSelection,
+    <Self::Selector as BackendSelection>::Iter: BackendIter,
+{
+}
+
+impl<T> Strategy for T
+where
+    T: SelectorBuilder + Send + Sync,
+    T::Selector: BackendSelection + Send + Sync,
+    <T::Selector as BackendSelection>::Iter: BackendIter,
+{
+}
+
+pub trait SelectorBuilder: PartialEq {
+    type Selector: BackendSelection;
+
+    fn build_selector(&self, backends: &BTreeSet<Backend>) -> Self::Selector;
+}
 
 /// [BackendSelection] is the interface to implement backend selection mechanisms.
 pub trait BackendSelection {
@@ -59,19 +84,25 @@ pub trait SelectionAlgorithm {
     fn next(&self, key: &[u8]) -> u64;
 }
 
+pub type FNVHash = Weighted<fnv::FnvHasher>;
+pub type FVNHash = Weighted<fnv::FnvHasher>;
+pub type Random = Weighted<algorithms::Random>;
+pub type RoundRobin = Weighted<algorithms::RoundRobin>;
+pub type Consistent = consistent::KetamaHashing;
+
 /// [FNV](https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function) hashing
 /// on weighted backends
-pub type FNVHash = Weighted<fnv::FnvHasher>;
+pub type FNVHashSelector = WeightedSelector<fnv::FnvHasher>;
 
 /// Alias of [`FNVHash`] for backwards compatibility until the next breaking change
 #[doc(hidden)]
-pub type FVNHash = Weighted<fnv::FnvHasher>;
+pub type FVNHashSelector = WeightedSelector<fnv::FnvHasher>;
 /// Random selection on weighted backends
-pub type Random = Weighted<algorithms::Random>;
+pub type RandomSelector = WeightedSelector<algorithms::Random>;
 /// Round robin selection on weighted backends
-pub type RoundRobin = Weighted<algorithms::RoundRobin>;
+pub type RoundRobinSelector = WeightedSelector<algorithms::RoundRobin>;
 /// Consistent Ketama hashing on weighted backends
-pub type Consistent = consistent::KetamaHashing;
+pub type ConsistentSelector = consistent::KetamaHashingSelector;
 
 // TODO: least conn
 
