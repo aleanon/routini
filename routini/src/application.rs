@@ -1,6 +1,7 @@
 use std::{net::TcpListener, time::Duration};
 
 use pingora::{prelude::background_service, proxy::http_proxy_service, server::Server};
+use serde::de::DeserializeOwned;
 
 use crate::{
     load_balancing::{
@@ -9,6 +10,7 @@ use crate::{
         selection::{BackendIter, BackendSelection, Strategy},
     },
     proxy::LB,
+    update_endpoint::UpdateStrategyEndpoint,
 };
 
 pub struct Application {
@@ -22,7 +24,7 @@ impl Application {
         strategy: S,
     ) -> Self
     where
-        S: Strategy + 'static,
+        S: Strategy + 'static + DeserializeOwned,
         S::Selector: BackendSelection + Send + Sync,
         <S::Selector as BackendSelection>::Iter: BackendIter,
     {
@@ -41,8 +43,10 @@ impl Application {
         server.add_service(background);
 
         let lb = LB {
-            load_balancer: handle,
+            load_balancer: handle.clone(),
         };
+
+        let update_strategy_endpoint = UpdateStrategyEndpoint::service(handle, "0.0.0.0:5000");
 
         let mut lb_service = http_proxy_service(&server.configuration, lb);
 
@@ -54,6 +58,7 @@ impl Application {
         lb_service.add_tcp(&socket_addr);
 
         server.add_service(lb_service);
+        server.add_service(update_strategy_endpoint);
 
         Self { server }
     }
