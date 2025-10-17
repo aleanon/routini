@@ -22,6 +22,8 @@ use health_check::Health;
 use selection::UniqueIterator;
 use selection::{BackendIter, BackendSelection};
 
+use crate::load_balancing::selection::{SelectorBuilder, Strategy};
+
 /// [Backend] represents a server to proxy or connect to.
 #[derive(Derivative)]
 #[derivative(Clone, Hash, PartialEq, PartialOrd, Eq, Ord, Debug)]
@@ -280,9 +282,15 @@ impl Backends {
 ///
 /// In order to run service discovery and health check at the designated frequencies, the [LoadBalancer]
 /// needs to be run as a [pingora_core::services::background::BackgroundService].
-pub struct LoadBalancer<S> {
+pub struct LoadBalancer<S>
+where
+    S: Strategy,
+    <S::Selector as BackendSelection>::Iter: BackendIter,
+{
     backends: Backends,
-    selector: ArcSwap<S>,
+    strategy: ArcSwap<S>,
+    selector: ArcSwap<S::Selector>,
+    // strategy_selector: StrategySelector<S>,
     /// How frequent the health check logic (if set) should run.
     ///
     /// If `None`, the health check logic will only run once at the beginning.
@@ -295,22 +303,25 @@ pub struct LoadBalancer<S> {
     pub parallel_health_check: bool,
 }
 
-impl<S: BackendSelection> LoadBalancer<S>
+impl<S> LoadBalancer<S>
 where
-    S: BackendSelection + 'static,
-    S::Iter: BackendIter,
+    S: Strategy,
+    <<S as SelectorBuilder>::Selector as BackendSelection>::Iter: BackendIter,
 {
     /// Build a [LoadBalancer] with static backends created from the iter.
     ///
     /// Note: [ToSocketAddrs] will invoke blocking network IO for DNS lookup if
     /// the input cannot be directly parsed as [SocketAddr].
-    pub fn try_from_iter<A, T: IntoIterator<Item = A>>(iter: T) -> IoResult<Self>
+    pub fn try_from_iter_with_strategy<A, T: IntoIterator<Item = A>>(
+        iter: T,
+        strategy: S,
+    ) -> IoResult<Self>
     where
         A: ToSocketAddrs,
     {
         let discovery = discovery::Static::try_from_iter(iter)?;
         let backends = Backends::new(discovery);
-        let lb = Self::from_backends(backends);
+        let lb = Self::from_backends_with_strategy(backends, strategy);
         lb.update()
             .now_or_never()
             .expect("static should not block")
@@ -318,12 +329,28 @@ where
         Ok(lb)
     }
 
+    pub fn try_from_iter<A, T: IntoIterator<Item = A>>(iter: T) -> IoResult<Self>
+    where
+        A: ToSocketAddrs,
+        S: Default,
+    {
+        Self::try_from_iter_with_strategy(iter, S::default())
+    }
+
     /// Build a [LoadBalancer] with the given [Backends].
-    pub fn from_backends(backends: Backends) -> Self {
-        let selector = ArcSwap::new(Arc::new(S::build(&backends.get_backend())));
+    pub fn from_backends(backends: Backends) -> Self
+    where
+        S: Default,
+    {
+        Self::from_backends_with_strategy(backends, S::default())
+    }
+
+    pub fn from_backends_with_strategy(backends: Backends, strategy: S) -> Self {
+        let selector = strategy.build_selector(&backends.get_backend());
         LoadBalancer {
             backends,
-            selector,
+            strategy: ArcSwap::new(Arc::new(strategy)),
+            selector: ArcSwap::new(Arc::new(selector)),
             health_check_frequency: None,
             update_frequency: None,
             parallel_health_check: false,
@@ -336,8 +363,22 @@ where
     /// is running as a background service.
     pub async fn update(&self) -> Result<()> {
         self.backends
-            .update(|backends| self.selector.store(Arc::new(S::build(&backends))))
+            .update(|backends| {
+                self.selector
+                    .store(Arc::new(self.strategy.load().build_selector(&backends)));
+            })
             .await
+    }
+
+    pub fn update_strategy(&self, strategy: S) {
+        if &strategy == &**self.strategy.load() {
+            return;
+        }
+        self.selector.store(Arc::new(
+            self.strategy
+                .load()
+                .build_selector(&self.backends().get_backend()),
+        ));
     }
 
     /// Return the first healthy [Backend] according to the selection algorithm and the
