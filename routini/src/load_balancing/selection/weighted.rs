@@ -18,6 +18,7 @@ use crate::load_balancing::selection::SelectorBuilder;
 
 use super::{Backend, BackendIter, BackendSelection, SelectionAlgorithm};
 use fnv::FnvHasher;
+use serde::Deserialize;
 use std::collections::BTreeSet;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -32,6 +33,7 @@ pub struct WeightedSelector<H = FnvHasher> {
     algorithm: H,
 }
 
+#[derive(Deserialize)]
 pub struct Weighted<H = FnvHasher>(PhantomData<H>);
 
 impl<H: SelectionAlgorithm> PartialEq for Weighted<H> {
