@@ -8,6 +8,7 @@ use std::{
 
 use arc_swap::ArcSwap;
 use pingora::{protocols::l4::socket::SocketAddr, upstreams::peer::Tracing};
+use serde::Deserialize;
 use smallvec::SmallVec;
 
 use crate::load_balancing::{
@@ -21,7 +22,7 @@ type ConnectionCount = Arc<AtomicUsize>;
 pub static CONNECTIONS: LazyLock<ArcSwap<BTreeMap<SocketAddr, (BackendIndex, ConnectionCount)>>> =
     LazyLock::new(|| ArcSwap::new(Arc::new(BTreeMap::new())));
 
-#[derive(Default, PartialEq, Eq)]
+#[derive(Default, PartialEq, Eq, Deserialize)]
 pub struct LeastConnections;
 
 impl SelectorBuilder for LeastConnections {
