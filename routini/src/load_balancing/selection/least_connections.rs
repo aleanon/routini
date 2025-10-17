@@ -12,7 +12,7 @@ use smallvec::SmallVec;
 
 use crate::load_balancing::{
     Backend,
-    selection::{BackendIter, BackendSelection},
+    selection::{BackendIter, BackendSelection, SelectorBuilder},
 };
 
 type BackendIndex = usize;
@@ -21,20 +21,26 @@ type ConnectionCount = Arc<AtomicUsize>;
 pub static CONNECTIONS: LazyLock<ArcSwap<BTreeMap<SocketAddr, (BackendIndex, ConnectionCount)>>> =
     LazyLock::new(|| ArcSwap::new(Arc::new(BTreeMap::new())));
 
-pub struct LeastConnections {
+#[derive(Default, PartialEq, Eq)]
+pub struct LeastConnections;
+
+impl SelectorBuilder for LeastConnections {
+    type Selector = LeastConnectionsSelector;
+
+    fn build_selector(&self, backends: &BTreeSet<Backend>) -> Self::Selector {
+        <Self::Selector as BackendSelection>::build(backends)
+    }
+}
+
+pub struct LeastConnectionsSelector {
     backends: Box<[Backend]>,
 }
 
-impl LeastConnections {
-    pub fn new(backends: &BTreeSet<Backend>) -> Self {
-        let backends = Vec::from_iter(backends.iter().cloned()).into_boxed_slice();
-        Self::from_backends(backends)
-    }
+impl BackendSelection for LeastConnectionsSelector {
+    type Iter = LeastConnectionsIter;
 
-    // The pingora built in load balancer assumes stateless backend selection, The backend selection
-    // is rebuilt every time update is called on the load balancer, this would cause connections to reset.
-    // This is why a static is used here instead of holding the connections in the LeastConnections struct.
-    pub fn from_backends(backends: Box<[Backend]>) -> Self {
+    fn build(backends: &BTreeSet<Backend>) -> Self {
+        let backends = Vec::from_iter(backends.iter().cloned()).into_boxed_slice();
         let connections = {
             let existing_connections = CONNECTIONS.load();
             backends
@@ -49,15 +55,7 @@ impl LeastConnections {
 
         CONNECTIONS.store(Arc::new(connections));
 
-        LeastConnections { backends }
-    }
-}
-
-impl BackendSelection for LeastConnections {
-    type Iter = LeastConnectionsIter;
-
-    fn build(backends: &BTreeSet<Backend>) -> Self {
-        LeastConnections::new(backends)
+        LeastConnectionsSelector { backends }
     }
 
     fn iter(self: &Arc<Self>, key: &[u8]) -> Self::Iter {
@@ -66,7 +64,7 @@ impl BackendSelection for LeastConnections {
 }
 
 pub struct LeastConnectionsIter {
-    least_connections: Arc<LeastConnections>,
+    least_connections: Arc<LeastConnectionsSelector>,
     /// The load balancer should use the first returned backend in the vast majority of cases,
     /// therefor we use a small vec to track previously returned backends. This lets us skip allocating
     /// most of the time when the iterator is used.
@@ -74,7 +72,7 @@ pub struct LeastConnectionsIter {
 }
 
 impl LeastConnectionsIter {
-    fn new(least_connections: Arc<LeastConnections>, _key: &[u8]) -> Self {
+    fn new(least_connections: Arc<LeastConnectionsSelector>, _key: &[u8]) -> Self {
         Self {
             least_connections,
             yielded: SmallVec::new(),
@@ -137,7 +135,7 @@ impl Tracing for ConnectionsTracer {
 mod tests {
     use super::*;
 
-    fn get_connection(least_connections: &Arc<LeastConnections>) -> Option<SocketAddr> {
+    fn get_connection(least_connections: &Arc<LeastConnectionsSelector>) -> Option<SocketAddr> {
         let mut iter = least_connections.iter(&[]);
         let Some(backend) = iter.next().and_then(|b| Some(b.addr.clone())) else {
             return None;
@@ -163,7 +161,7 @@ mod tests {
             .map(|a| Backend::new(&a.to_string()).unwrap())
             .collect();
 
-        let least_connections = Arc::new(LeastConnections::new(&backends));
+        let least_connections = Arc::new(LeastConnections.build_selector(&backends));
         backends.iter().enumerate().for_each(|(i, b)| {
             let map = CONNECTIONS.load();
             let connections = map.get(&b.addr).unwrap();
