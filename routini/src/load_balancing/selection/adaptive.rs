@@ -1,5 +1,7 @@
 use std::{collections::BTreeSet, sync::Arc};
 
+use serde::Deserialize;
+
 use crate::load_balancing::{
     Backend,
     selection::{
@@ -9,7 +11,7 @@ use crate::load_balancing::{
     },
 };
 
-#[derive(Default, PartialEq)]
+#[derive(Default, PartialEq, Deserialize)]
 pub enum Adaptive {
     #[default]
     RoundRobin,
