@@ -10,7 +10,7 @@ use crate::{
         selection::{BackendIter, BackendSelection, Strategy},
     },
     proxy::LB,
-    update_endpoint::UpdateStrategyEndpoint,
+    set_strategy_endpoint::SetStrategyEndpoint,
 };
 
 pub struct Application {
@@ -46,7 +46,7 @@ impl Application {
             load_balancer: handle.clone(),
         };
 
-        let update_strategy_endpoint = UpdateStrategyEndpoint::service(handle, "0.0.0.0:5000");
+        let update_strategy_endpoint = SetStrategyEndpoint::service(handle, "0.0.0.0:5000");
 
         let mut lb_service = http_proxy_service(&server.configuration, lb);
 
