@@ -15,7 +15,7 @@ use crate::load_balancing::{
 /// Temporary endpoint for updating the load balancer strategy,
 /// This should be automatically decided by an internal task
 #[derive(Clone)]
-pub struct UpdateStrategyEndpoint<S>
+pub struct SetStrategyEndpoint<S>
 where
     S: Strategy + Send + Sync + 'static,
     S::Selector: BackendSelection + Send + Sync,
@@ -24,7 +24,7 @@ where
     pub load_balancer: Arc<LoadBalancer<S>>,
 }
 
-impl<S> UpdateStrategyEndpoint<S>
+impl<S> SetStrategyEndpoint<S>
 where
     S: Strategy + Send + Sync + 'static + DeserializeOwned,
     S::Selector: BackendSelection + Send + Sync,
@@ -38,7 +38,7 @@ where
 }
 
 #[async_trait::async_trait]
-impl<S> ServeHttp for UpdateStrategyEndpoint<S>
+impl<S> ServeHttp for SetStrategyEndpoint<S>
 where
     S: Strategy + Send + Sync + 'static + DeserializeOwned,
     S::Selector: BackendSelection + Send + Sync,
