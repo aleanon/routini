@@ -14,7 +14,7 @@ use pingora::{
 };
 use tracing::instrument;
 
-use crate::{application::StrategyKind, connections_tracer::ConnectionsTracer};
+use crate::connections_tracer::ConnectionsTracer;
 
 // DEFAULT_MAX_ALGORITHM_ITERATIONS is there to bound the search time for the next Backend. In certain algorithm like Ketama hashing, the search for the next backend is linear and could take a lot of steps.
 pub const DEFAULT_MAX_ALGORITHM_ITERATIONS: usize = 256;
