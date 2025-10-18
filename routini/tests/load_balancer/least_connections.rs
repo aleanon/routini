@@ -37,7 +37,6 @@ async fn should_connect_to_backend_with_least_connections() {
         handle.await.expect("Unable to join tasks");
     }
 
-<<<<<<< HEAD
     let connections = CONNECTIONS.load();
 
     // sins the loadbalancer reuses connections, it will only open a connection on each backend once
