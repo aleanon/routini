@@ -57,8 +57,8 @@ impl Application {
 
         lb_service.add_tcp(&socket_addr);
 
-        server.add_service(lb_service);
         server.add_service(update_strategy_endpoint);
+        server.add_service(lb_service);
 
         Self { server }
     }
