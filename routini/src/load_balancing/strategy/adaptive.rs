@@ -5,9 +5,9 @@ use serde::Deserialize;
 use crate::load_balancing::{
     Backend,
     strategy::{
-        BackendIter, BackendSelection, Strategy, consistent::ConsistentSelector,
-        fewest_connections::FewestConnectionsSelector, fnv_hash::FNVHashSelector,
-        random::RandomSelector, round_robin::RoundRobinSelector,
+        BackendIter, BackendSelection, Consistent, FNVHash, FewestConnections, Random, RoundRobin,
+        Strategy, consistent::ConsistentSelector, fewest_connections::FewestConnectionsSelector,
+        fnv_hash::FNVHashSelector, random::RandomSelector, round_robin::RoundRobinSelector,
     },
 };
 
@@ -27,17 +27,19 @@ impl Strategy for Adaptive {
     fn build_backend_selector(&self, backends: &BTreeSet<Backend>) -> Self::BackendSelector {
         match self {
             Adaptive::RoundRobin => {
-                AdaptiveSelector::RoundRobin(Arc::new(RoundRobinSelector::build(backends)))
+                AdaptiveSelector::RoundRobin(Arc::new(RoundRobin.build_backend_selector(backends)))
             }
-            Adaptive::Random => AdaptiveSelector::Random(Arc::new(RandomSelector::build(backends))),
+            Adaptive::Random => {
+                AdaptiveSelector::Random(Arc::new(Random.build_backend_selector(backends)))
+            }
             Adaptive::FNVHash => {
-                AdaptiveSelector::FNVHash(Arc::new(FNVHashSelector::build(backends)))
+                AdaptiveSelector::FNVHash(Arc::new(FNVHash.build_backend_selector(backends)))
             }
             Adaptive::Consistent => {
-                AdaptiveSelector::Consistent(Arc::new(ConsistentSelector::build(backends)))
+                AdaptiveSelector::Consistent(Arc::new(Consistent.build_backend_selector(backends)))
             }
             Adaptive::LeastConnections => AdaptiveSelector::LeastConnections(Arc::new(
-                FewestConnectionsSelector::build(backends),
+                FewestConnections.build_backend_selector(backends),
             )),
         }
     }
@@ -53,10 +55,6 @@ pub enum AdaptiveSelector {
 
 impl BackendSelection for AdaptiveSelector {
     type Iter = AdaptiveIter;
-
-    fn build(backends: &BTreeSet<Backend>) -> Self {
-        Self::RoundRobin(Arc::new(RoundRobinSelector::build(backends)))
-    }
 
     fn iter(self: &Arc<Self>, key: &[u8]) -> Self::Iter
     where

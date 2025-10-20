@@ -29,10 +29,8 @@ pub struct WeightedSelector<H = FnvHasher> {
     algorithm: H,
 }
 
-impl<H: SelectionAlgorithm + Send + Sync> BackendSelection for WeightedSelector<H> {
-    type Iter = WeightedIterator<H>;
-
-    fn build(backends: &BTreeSet<Backend>) -> Self {
+impl<H: SelectionAlgorithm + Send + Sync> WeightedSelector<H> {
+    pub fn new(backends: &BTreeSet<Backend>) -> Self {
         assert!(
             backends.len() <= u16::MAX as usize,
             "support up to 2^16 backends"
@@ -50,6 +48,10 @@ impl<H: SelectionAlgorithm + Send + Sync> BackendSelection for WeightedSelector<
             algorithm: H::new(),
         }
     }
+}
+
+impl<H: SelectionAlgorithm + Send + Sync> BackendSelection for WeightedSelector<H> {
+    type Iter = WeightedIterator<H>;
 
     fn iter(self: &Arc<Self>, key: &[u8]) -> Self::Iter {
         WeightedIterator::new(key, self.clone())

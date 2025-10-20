@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 use crate::load_balancing::{
     Backend,
-    strategy::{BackendSelection, Strategy, algorithms, weighted::WeightedSelector},
+    strategy::{Strategy, algorithms, weighted::WeightedSelector},
 };
 
 pub type RandomSelector = WeightedSelector<algorithms::Random>;
@@ -16,7 +16,7 @@ impl Strategy for Random {
     type BackendSelector = RandomSelector;
 
     fn build_backend_selector(&self, backends: &BTreeSet<Backend>) -> Self::BackendSelector {
-        RandomSelector::build(backends)
+        RandomSelector::new(backends)
     }
 }
 

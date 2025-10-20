@@ -29,18 +29,6 @@ impl Strategy for FewestConnections {
     type BackendSelector = FewestConnectionsSelector;
 
     fn build_backend_selector(&self, backends: &BTreeSet<Backend>) -> Self::BackendSelector {
-        <Self::BackendSelector as BackendSelection>::build(backends)
-    }
-}
-
-pub struct FewestConnectionsSelector {
-    backends: Box<[Backend]>,
-}
-
-impl BackendSelection for FewestConnectionsSelector {
-    type Iter = FewestConnectionsIter;
-
-    fn build(backends: &BTreeSet<Backend>) -> Self {
         let backends = Vec::from_iter(backends.iter().cloned()).into_boxed_slice();
         let connections = {
             let existing_connections = CONNECTIONS.load();
@@ -58,6 +46,14 @@ impl BackendSelection for FewestConnectionsSelector {
 
         FewestConnectionsSelector { backends }
     }
+}
+
+pub struct FewestConnectionsSelector {
+    backends: Box<[Backend]>,
+}
+
+impl BackendSelection for FewestConnectionsSelector {
+    type Iter = FewestConnectionsIter;
 
     fn iter(self: &Arc<Self>, key: &[u8]) -> Self::Iter {
         FewestConnectionsIter::new(self.clone(), key)

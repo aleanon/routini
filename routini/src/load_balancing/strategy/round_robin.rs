@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 use crate::load_balancing::{
     Backend,
-    strategy::{BackendSelection, Strategy, algorithms, weighted::WeightedSelector},
+    strategy::{Strategy, algorithms, weighted::WeightedSelector},
 };
 
 pub type RoundRobinSelector = WeightedSelector<algorithms::RoundRobin>;
@@ -16,7 +16,7 @@ impl Strategy for RoundRobin {
     type BackendSelector = RoundRobinSelector;
 
     fn build_backend_selector(&self, backends: &BTreeSet<Backend>) -> Self::BackendSelector {
-        RoundRobinSelector::build(backends)
+        RoundRobinSelector::new(backends)
     }
 }
 

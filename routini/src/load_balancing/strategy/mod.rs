@@ -51,7 +51,7 @@ pub trait BackendSelection: Send + Sync {
     /// The [BackendIter] returned from iter() below.
     type Iter;
     /// The function to create a [BackendSelection] implementation.
-    fn build(backends: &BTreeSet<Backend>) -> Self;
+    // fn build(backends: &BTreeSet<Backend>) -> Self;
     /// Select backends for a given key.
     ///
     /// An [BackendIter] should be returned. The first item in the iter is the first

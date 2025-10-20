@@ -28,21 +28,6 @@ impl Strategy for Consistent {
     type BackendSelector = ConsistentSelector;
 
     fn build_backend_selector(&self, backends: &BTreeSet<Backend>) -> Self::BackendSelector {
-        <Self::BackendSelector as BackendSelection>::build(backends)
-    }
-}
-
-/// Weighted Ketama consistent hashing
-pub struct KetamaHashingSelector {
-    ring: Continuum,
-    // TODO: update Ketama to just store this
-    backends: HashMap<SocketAddr, Backend>,
-}
-
-impl BackendSelection for KetamaHashingSelector {
-    type Iter = OwnedNodeIterator;
-
-    fn build(backends: &BTreeSet<Backend>) -> Self {
         let buckets: Vec<_> = backends
             .iter()
             .filter_map(|b| {
@@ -64,6 +49,17 @@ impl BackendSelection for KetamaHashingSelector {
             backends: new_backends,
         }
     }
+}
+
+/// Weighted Ketama consistent hashing
+pub struct KetamaHashingSelector {
+    ring: Continuum,
+    // TODO: update Ketama to just store this
+    backends: HashMap<SocketAddr, Backend>,
+}
+
+impl BackendSelection for KetamaHashingSelector {
+    type Iter = OwnedNodeIterator;
 
     fn iter(self: &Arc<Self>, key: &[u8]) -> Self::Iter {
         OwnedNodeIterator {
@@ -98,7 +94,7 @@ mod test {
         let b2 = Backend::new("1.0.0.1:80").unwrap();
         let b3 = Backend::new("1.0.0.255:80").unwrap();
         let backends = BTreeSet::from_iter([b1.clone(), b2.clone(), b3.clone()]);
-        let hash = Arc::new(KetamaHashingSelector::build(&backends));
+        let hash = Arc::new(Consistent.build_backend_selector(&backends));
 
         let mut iter = hash.iter(b"test0");
         assert_eq!(iter.next(), Some(&b2));
@@ -123,7 +119,7 @@ mod test {
 
         // remove b3
         let backends = BTreeSet::from_iter([b1.clone(), b2.clone()]);
-        let hash = Arc::new(KetamaHashingSelector::build(&backends));
+        let hash = Arc::new(Consistent.build_backend_selector(&backends));
         let mut iter = hash.iter(b"test0");
         assert_eq!(iter.next(), Some(&b2));
         let mut iter = hash.iter(b"test1");

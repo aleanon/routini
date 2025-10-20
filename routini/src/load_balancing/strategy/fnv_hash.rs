@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 use crate::load_balancing::{
     Backend,
-    strategy::{BackendSelection, Strategy, weighted::WeightedSelector},
+    strategy::{Strategy, weighted::WeightedSelector},
 };
 
 pub type FNVHashSelector = WeightedSelector<fnv::FnvHasher>;
@@ -16,7 +16,7 @@ impl Strategy for FNVHash {
     type BackendSelector = FNVHashSelector;
 
     fn build_backend_selector(&self, backends: &BTreeSet<Backend>) -> Self::BackendSelector {
-        FNVHashSelector::build(backends)
+        FNVHashSelector::new(backends)
     }
 }
 
