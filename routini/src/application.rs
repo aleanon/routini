@@ -7,6 +7,7 @@ use crate::{
     load_balancing::{LoadBalancer, health_check::TcpHealthCheck, selection::Strategy},
     proxy::LB,
     set_strategy_endpoint::SetStrategyEndpoint,
+    utils::constants::SET_STRATEGY_ENDPOINT_ADDRESS,
 };
 
 pub struct Application {
@@ -40,7 +41,8 @@ impl Application {
             load_balancer: handle.clone(),
         };
 
-        let update_strategy_endpoint = SetStrategyEndpoint::service(handle, "0.0.0.0:5000");
+        let update_strategy_endpoint =
+            SetStrategyEndpoint::service(handle, SET_STRATEGY_ENDPOINT_ADDRESS);
 
         let mut lb_service = http_proxy_service(&server.configuration, lb);
 
