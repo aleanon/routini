@@ -10,16 +10,12 @@ use tracing::instrument;
 
 use crate::load_balancing::{
     LoadBalancer,
-    strategy::{BackendIter, BackendSelection, Strategy, fewest_connections::ConnectionsTracer},
+    strategy::{Strategy, fewest_connections::ConnectionsTracer},
 };
 
 pub const DEFAULT_MAX_ALGORITHM_ITERATIONS: usize = 256;
 
-pub struct LB<S>
-where
-    S: Strategy,
-    <S::BackendSelector as BackendSelection>::Iter: BackendIter,
-{
+pub struct LB<S: Strategy> {
     pub load_balancer: Arc<LoadBalancer<S>>,
 }
 
@@ -27,8 +23,6 @@ where
 impl<S: Strategy> ProxyHttp for LB<S>
 where
     S: Strategy,
-    S::BackendSelector: BackendSelection + Send + Sync,
-    <S::BackendSelector as BackendSelection>::Iter: BackendIter,
 {
     type CTX = ();
     fn new_ctx(&self) -> Self::CTX {}

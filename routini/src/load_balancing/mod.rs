@@ -287,9 +287,10 @@ where
     S: Strategy,
 {
     backends: Backends,
+    /// Controls what Strategy should be used when rebuilding the selector after an update.
+    /// Usually a zero sized type that implements [Strategy]
     strategy: ArcSwap<S>,
     selector: ArcSwap<S::BackendSelector>,
-    // strategy_selector: StrategySelector<S>,
     /// How frequent the health check logic (if set) should run.
     ///
     /// If `None`, the health check logic will only run once at the beginning.

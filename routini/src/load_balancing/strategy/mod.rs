@@ -36,7 +36,7 @@ use super::Backend;
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
-/// A builder for A backend selector, this is
+/// A builder for a backend selector
 pub trait Strategy: PartialEq + Send + Sync
 where
     <Self::BackendSelector as BackendSelection>::Iter: BackendIter,
