@@ -46,12 +46,4 @@ async fn should_connect_to_backend_with_least_connections() {
             .all(|(_, count)| count.1.load(std::sync::atomic::Ordering::Relaxed) == 1),
         "All backends should have received at least one request"
     );
-
-    // sins the loadbalancer reuses connections, it will only open a connection on each backend once
-    assert!(
-        connections
-            .iter()
-            .all(|(_, count)| count.1.load(std::sync::atomic::Ordering::Relaxed) == 1),
-        "All backends should have received at least one request"
-    );
 }
