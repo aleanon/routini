@@ -7,28 +7,21 @@ use pingora::{
 use serde::de::DeserializeOwned;
 use tracing::{error, info};
 
-use crate::load_balancing::{
-    LoadBalancer,
-    selection::{BackendIter, BackendSelection, Strategy},
-};
+use crate::load_balancing::{LoadBalancer, selection::Strategy};
 
 /// Temporary endpoint for updating the load balancer strategy,
 /// This should be automatically decided by an internal task
 #[derive(Clone)]
 pub struct SetStrategyEndpoint<S>
 where
-    S: Strategy + Send + Sync + 'static,
-    S::Selector: BackendSelection + Send + Sync,
-    <S::Selector as BackendSelection>::Iter: BackendIter,
+    S: Strategy + 'static,
 {
     pub load_balancer: Arc<LoadBalancer<S>>,
 }
 
 impl<S> SetStrategyEndpoint<S>
 where
-    S: Strategy + Send + Sync + 'static + DeserializeOwned,
-    S::Selector: BackendSelection + Send + Sync,
-    <S::Selector as BackendSelection>::Iter: BackendIter,
+    S: Strategy + 'static + DeserializeOwned,
 {
     pub fn service(load_balancer: Arc<LoadBalancer<S>>, address: &str) -> Service<Self> {
         let mut service = Service::new("strategy_updater".to_string(), Self { load_balancer });
@@ -40,9 +33,7 @@ where
 #[async_trait::async_trait]
 impl<S> ServeHttp for SetStrategyEndpoint<S>
 where
-    S: Strategy + Send + Sync + 'static + DeserializeOwned,
-    S::Selector: BackendSelection + Send + Sync,
-    <S::Selector as BackendSelection>::Iter: BackendIter,
+    S: Strategy + 'static + DeserializeOwned,
 {
     async fn response(&self, http_session: &mut ServerSession) -> Response<Vec<u8>> {
         info!("request received");

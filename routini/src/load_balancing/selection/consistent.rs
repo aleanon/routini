@@ -22,11 +22,11 @@ use std::collections::HashMap;
 #[derive(Default, PartialEq)]
 pub struct KetamaHashing;
 
-impl SelectorBuilder for KetamaHashing {
-    type Selector = KetamaHashingSelector;
+impl Strategy for KetamaHashing {
+    type BackendSelector = KetamaHashingSelector;
 
-    fn build_selector(&self, backends: &BTreeSet<Backend>) -> Self::Selector {
-        <Self::Selector as BackendSelection>::build(backends)
+    fn build_backend_selector(&self, backends: &BTreeSet<Backend>) -> Self::BackendSelector {
+        <Self::BackendSelector as BackendSelection>::build(backends)
     }
 }
 

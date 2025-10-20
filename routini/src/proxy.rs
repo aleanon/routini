@@ -18,7 +18,7 @@ pub const DEFAULT_MAX_ALGORITHM_ITERATIONS: usize = 256;
 pub struct LB<S>
 where
     S: Strategy,
-    <S::Selector as BackendSelection>::Iter: BackendIter,
+    <S::BackendSelector as BackendSelection>::Iter: BackendIter,
 {
     pub load_balancer: Arc<LoadBalancer<S>>,
 }
@@ -27,8 +27,8 @@ where
 impl<S: Strategy> ProxyHttp for LB<S>
 where
     S: Strategy,
-    S::Selector: BackendSelection + Send + Sync,
-    <S::Selector as BackendSelection>::Iter: BackendIter,
+    S::BackendSelector: BackendSelection + Send + Sync,
+    <S::BackendSelector as BackendSelection>::Iter: BackendIter,
 {
     type CTX = ();
     fn new_ctx(&self) -> Self::CTX {}

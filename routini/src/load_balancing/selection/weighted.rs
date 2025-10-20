@@ -14,7 +14,7 @@
 
 //! Weighted Selection
 
-use crate::load_balancing::selection::SelectorBuilder;
+use crate::load_balancing::selection::Strategy;
 
 use super::{Backend, BackendIter, BackendSelection, SelectionAlgorithm};
 use fnv::FnvHasher;
@@ -48,15 +48,15 @@ impl<H: SelectionAlgorithm> Default for Weighted<H> {
     }
 }
 
-impl<H: SelectionAlgorithm> SelectorBuilder for Weighted<H> {
-    type Selector = WeightedSelector<H>;
+impl<H: SelectionAlgorithm + Send + Sync> Strategy for Weighted<H> {
+    type BackendSelector = WeightedSelector<H>;
 
-    fn build_selector(&self, backends: &BTreeSet<Backend>) -> Self::Selector {
-        <Self::Selector as BackendSelection>::build(backends)
+    fn build_backend_selector(&self, backends: &BTreeSet<Backend>) -> Self::BackendSelector {
+        <Self::BackendSelector as BackendSelection>::build(backends)
     }
 }
 
-impl<H: SelectionAlgorithm> BackendSelection for WeightedSelector<H> {
+impl<H: SelectionAlgorithm + Send + Sync> BackendSelection for WeightedSelector<H> {
     type Iter = WeightedIterator<H>;
 
     fn build(backends: &BTreeSet<Backend>) -> Self {

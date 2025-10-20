@@ -19,10 +19,10 @@ pub mod selection;
 
 use discovery::ServiceDiscovery;
 use health_check::Health;
+use selection::BackendSelection;
 use selection::UniqueIterator;
-use selection::{BackendIter, BackendSelection};
 
-use crate::load_balancing::selection::{SelectorBuilder, Strategy};
+use crate::load_balancing::selection::Strategy;
 
 /// [Backend] represents a server to proxy or connect to.
 #[derive(Derivative)]
@@ -285,11 +285,10 @@ impl Backends {
 pub struct LoadBalancer<S>
 where
     S: Strategy,
-    <S::Selector as BackendSelection>::Iter: BackendIter,
 {
     backends: Backends,
     strategy: ArcSwap<S>,
-    selector: ArcSwap<S::Selector>,
+    selector: ArcSwap<S::BackendSelector>,
     // strategy_selector: StrategySelector<S>,
     /// How frequent the health check logic (if set) should run.
     ///
@@ -306,7 +305,6 @@ where
 impl<S> LoadBalancer<S>
 where
     S: Strategy,
-    <<S as SelectorBuilder>::Selector as BackendSelection>::Iter: BackendIter,
 {
     /// Build a [LoadBalancer] with static backends created from the iter.
     ///
@@ -346,7 +344,7 @@ where
     }
 
     pub fn from_backends_with_strategy(backends: Backends, strategy: S) -> Self {
-        let selector = strategy.build_selector(&backends.get_backend());
+        let selector = strategy.build_backend_selector(&backends.get_backend());
         LoadBalancer {
             backends,
             strategy: ArcSwap::new(Arc::new(strategy)),
@@ -364,8 +362,9 @@ where
     pub async fn update(&self) -> Result<()> {
         self.backends
             .update(|backends| {
-                self.selector
-                    .store(Arc::new(self.strategy.load().build_selector(&backends)));
+                self.selector.store(Arc::new(
+                    self.strategy.load().build_backend_selector(&backends),
+                ));
             })
             .await
     }
@@ -379,7 +378,7 @@ where
         self.selector.store(Arc::new(
             self.strategy
                 .load()
-                .build_selector(&self.backends().get_backend()),
+                .build_backend_selector(&self.backends().get_backend()),
         ));
     }
 

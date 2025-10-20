@@ -6,8 +6,7 @@ use crate::load_balancing::{
     Backend,
     selection::{
         BackendIter, BackendSelection, ConsistentSelector, FNVHashSelector, RandomSelector,
-        RoundRobin, RoundRobinSelector, SelectorBuilder,
-        least_connections::LeastConnectionsSelector,
+        RoundRobin, RoundRobinSelector, Strategy, least_connections::LeastConnectionsSelector,
     },
 };
 
@@ -21,13 +20,13 @@ pub enum Adaptive {
     LeastConnections,
 }
 
-impl SelectorBuilder for Adaptive {
-    type Selector = AdaptiveSelector;
+impl Strategy for Adaptive {
+    type BackendSelector = AdaptiveSelector;
 
-    fn build_selector(&self, backends: &BTreeSet<Backend>) -> Self::Selector {
+    fn build_backend_selector(&self, backends: &BTreeSet<Backend>) -> Self::BackendSelector {
         match self {
             Adaptive::RoundRobin => AdaptiveSelector::RoundRobin(Arc::new(
-                RoundRobin::default().build_selector(backends),
+                RoundRobin::default().build_backend_selector(backends),
             )),
             Adaptive::Random => AdaptiveSelector::Random(Arc::new(RandomSelector::build(backends))),
             Adaptive::FNVHash => {

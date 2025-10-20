@@ -1,10 +1,7 @@
 use std::{io, net::Ipv4Addr};
 
 use fake::{Fake, Faker};
-use routini::{
-    application::Application,
-    load_balancing::selection::{BackendIter, BackendSelection, Strategy},
-};
+use routini::{application::Application, load_balancing::selection::Strategy};
 use serde::de::DeserializeOwned;
 use tokio::net::TcpListener;
 
@@ -18,8 +15,6 @@ impl TestApp {
     pub async fn new<S>(selection_strategy: S) -> io::Result<Self>
     where
         S: Strategy + 'static + DeserializeOwned,
-        S::Selector: BackendSelection + Send + Sync,
-        <S::Selector as BackendSelection>::Iter: BackendIter,
     {
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         let server_address = format!("http://{}", listener.local_addr()?);
