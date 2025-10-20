@@ -4,11 +4,7 @@ use pingora::{prelude::background_service, proxy::http_proxy_service, server::Se
 use serde::de::DeserializeOwned;
 
 use crate::{
-    load_balancing::{
-        LoadBalancer,
-        health_check::TcpHealthCheck,
-        selection::{BackendIter, BackendSelection, Strategy},
-    },
+    load_balancing::{LoadBalancer, health_check::TcpHealthCheck, selection::Strategy},
     proxy::LB,
     set_strategy_endpoint::SetStrategyEndpoint,
 };
@@ -25,8 +21,6 @@ impl Application {
     ) -> Self
     where
         S: Strategy + 'static + DeserializeOwned,
-        S::Selector: BackendSelection + Send + Sync,
-        <S::Selector as BackendSelection>::Iter: BackendIter,
     {
         let mut server = Server::new(None).expect("Failed to create server");
         server.bootstrap();

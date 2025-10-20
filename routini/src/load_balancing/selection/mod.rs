@@ -27,30 +27,18 @@ use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 use weighted::Weighted;
 
-/// Super trait for any complete strategy implementation.
-pub trait Strategy: SelectorBuilder + Send + Sync
+/// A builder for A backend selector, this is
+pub trait Strategy: PartialEq + Send + Sync
 where
-    Self::Selector: BackendSelection,
-    <Self::Selector as BackendSelection>::Iter: BackendIter,
+    <Self::BackendSelector as BackendSelection>::Iter: BackendIter,
 {
-}
+    type BackendSelector: BackendSelection;
 
-impl<T> Strategy for T
-where
-    T: SelectorBuilder + Send + Sync,
-    T::Selector: BackendSelection + Send + Sync,
-    <T::Selector as BackendSelection>::Iter: BackendIter,
-{
-}
-
-pub trait SelectorBuilder: PartialEq {
-    type Selector: BackendSelection;
-
-    fn build_selector(&self, backends: &BTreeSet<Backend>) -> Self::Selector;
+    fn build_backend_selector(&self, backends: &BTreeSet<Backend>) -> Self::BackendSelector;
 }
 
 /// [BackendSelection] is the interface to implement backend selection mechanisms.
-pub trait BackendSelection {
+pub trait BackendSelection: Send + Sync {
     /// The [BackendIter] returned from iter() below.
     type Iter;
     /// The function to create a [BackendSelection] implementation.

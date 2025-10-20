@@ -13,7 +13,7 @@ use smallvec::SmallVec;
 
 use crate::load_balancing::{
     Backend,
-    selection::{BackendIter, BackendSelection, SelectorBuilder},
+    selection::{BackendIter, BackendSelection, Strategy},
 };
 
 type BackendIndex = usize;
@@ -25,11 +25,11 @@ pub static CONNECTIONS: LazyLock<ArcSwap<BTreeMap<SocketAddr, (BackendIndex, Con
 #[derive(Default, PartialEq, Eq, Deserialize)]
 pub struct LeastConnections;
 
-impl SelectorBuilder for LeastConnections {
-    type Selector = LeastConnectionsSelector;
+impl Strategy for LeastConnections {
+    type BackendSelector = LeastConnectionsSelector;
 
-    fn build_selector(&self, backends: &BTreeSet<Backend>) -> Self::Selector {
-        <Self::Selector as BackendSelection>::build(backends)
+    fn build_backend_selector(&self, backends: &BTreeSet<Backend>) -> Self::BackendSelector {
+        <Self::BackendSelector as BackendSelection>::build(backends)
     }
 }
 
@@ -162,7 +162,7 @@ mod tests {
             .map(|a| Backend::new(&a.to_string()).unwrap())
             .collect();
 
-        let least_connections = Arc::new(LeastConnections.build_selector(&backends));
+        let least_connections = Arc::new(LeastConnections.build_backend_selector(&backends));
         backends.iter().enumerate().for_each(|(i, b)| {
             let map = CONNECTIONS.load();
             let connections = map.get(&b.addr).unwrap();
