@@ -1,5 +1,5 @@
 use routini::{
-    application::Application, load_balancing::selection::adaptive::Adaptive,
+    application::Application, load_balancing::strategy::adaptive::Adaptive,
     utils::tracing::init_tracing,
 };
 use std::net::TcpListener;

@@ -17,15 +17,24 @@
 pub mod adaptive;
 pub mod algorithms;
 pub mod consistent;
-pub mod least_connections;
+pub mod fewest_connections;
+pub mod fnv_hash;
+pub mod random;
+pub mod round_robin;
 pub mod weighted;
 
-use crate::load_balancing::selection::weighted::WeightedSelector;
+pub use {
+    adaptive::Adaptive, consistent::Consistent, fewest_connections::FewestConnections,
+    fnv_hash::FNVHash, random::Random, round_robin::RoundRobin,
+};
+
+/// Kept around for backwards compatibility until the next breaking change.
+#[doc(hidden)]
+pub type FVNHash = fnv_hash::FNVHash;
 
 use super::Backend;
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
-use weighted::Weighted;
 
 /// A builder for A backend selector, this is
 pub trait Strategy: PartialEq + Send + Sync
@@ -71,26 +80,6 @@ pub trait SelectionAlgorithm {
     /// the valid index of the backend.
     fn next(&self, key: &[u8]) -> u64;
 }
-
-pub type FNVHash = Weighted<fnv::FnvHasher>;
-pub type FVNHash = Weighted<fnv::FnvHasher>;
-pub type Random = Weighted<algorithms::Random>;
-pub type RoundRobin = Weighted<algorithms::RoundRobin>;
-pub type Consistent = consistent::KetamaHashing;
-
-/// [FNV](https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function) hashing
-/// on weighted backends
-pub type FNVHashSelector = WeightedSelector<fnv::FnvHasher>;
-
-/// Alias of [`FNVHash`] for backwards compatibility until the next breaking change
-#[doc(hidden)]
-pub type FVNHashSelector = WeightedSelector<fnv::FnvHasher>;
-/// Random selection on weighted backends
-pub type RandomSelector = WeightedSelector<algorithms::Random>;
-/// Round robin selection on weighted backends
-pub type RoundRobinSelector = WeightedSelector<algorithms::RoundRobin>;
-/// Consistent Ketama hashing on weighted backends
-pub type ConsistentSelector = consistent::KetamaHashingSelector;
 
 // TODO: least conn
 

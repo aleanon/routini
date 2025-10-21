@@ -10,7 +10,7 @@ use tracing::instrument;
 
 use crate::load_balancing::{
     LoadBalancer,
-    selection::{BackendIter, BackendSelection, Strategy, least_connections::ConnectionsTracer},
+    strategy::{BackendIter, BackendSelection, Strategy, fewest_connections::ConnectionsTracer},
 };
 
 pub const DEFAULT_MAX_ALGORITHM_ITERATIONS: usize = 256;

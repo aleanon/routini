@@ -1,13 +1,13 @@
 use crate::helpers::TestApp;
 use reqwest::StatusCode;
-use routini::load_balancing::selection::least_connections::{CONNECTIONS, LeastConnections};
+use routini::load_balancing::strategy::fewest_connections::{CONNECTIONS, FewestConnections};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
 #[tokio::test]
 async fn should_connect_to_backend_with_least_connections() {
-    let app = match TestApp::new(LeastConnections).await {
+    let app = match TestApp::new(FewestConnections).await {
         Ok(app) => Arc::new(app),
         Err(err) => {
             eprintln!("Skipping test: unable to bootstrap test app ({err})");

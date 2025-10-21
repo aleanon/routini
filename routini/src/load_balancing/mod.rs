@@ -15,14 +15,14 @@ use std::time::Duration;
 mod background;
 pub mod discovery;
 pub mod health_check;
-pub mod selection;
+pub mod strategy;
 
 use discovery::ServiceDiscovery;
 use health_check::Health;
-use selection::BackendSelection;
-use selection::UniqueIterator;
+use strategy::BackendSelection;
+use strategy::UniqueIterator;
 
-use crate::load_balancing::selection::Strategy;
+use crate::load_balancing::strategy::Strategy;
 
 /// [Backend] represents a server to proxy or connect to.
 #[derive(Derivative)]
@@ -441,7 +441,7 @@ mod test {
 
     #[tokio::test]
     async fn test_static_backends() {
-        let backends: LoadBalancer<selection::RoundRobin> =
+        let backends: LoadBalancer<strategy::round_robin::RoundRobin> =
             LoadBalancer::try_from_iter(["1.1.1.1:80", "1.0.0.1:80"]).unwrap();
 
         let backend1 = Backend::new("1.1.1.1:80").unwrap();
@@ -614,7 +614,7 @@ mod test {
         async fn test_consistency() {
             let expected = 3000;
             let discovery = MockDiscovery { expected };
-            let lb = Arc::new(LoadBalancer::<selection::Consistent>::from_backends(
+            let lb = Arc::new(LoadBalancer::<strategy::Consistent>::from_backends(
                 Backends::new(Box::new(discovery)),
             ));
             let lb2 = lb.clone();

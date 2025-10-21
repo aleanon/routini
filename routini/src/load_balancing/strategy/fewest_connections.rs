@@ -13,7 +13,7 @@ use smallvec::SmallVec;
 
 use crate::load_balancing::{
     Backend,
-    selection::{BackendIter, BackendSelection, Strategy},
+    strategy::{BackendIter, BackendSelection, Strategy},
 };
 
 type BackendIndex = usize;
@@ -23,22 +23,22 @@ pub static CONNECTIONS: LazyLock<ArcSwap<BTreeMap<SocketAddr, (BackendIndex, Con
     LazyLock::new(|| ArcSwap::new(Arc::new(BTreeMap::new())));
 
 #[derive(Default, PartialEq, Eq, Deserialize)]
-pub struct LeastConnections;
+pub struct FewestConnections;
 
-impl Strategy for LeastConnections {
-    type BackendSelector = LeastConnectionsSelector;
+impl Strategy for FewestConnections {
+    type BackendSelector = FewestConnectionsSelector;
 
     fn build_backend_selector(&self, backends: &BTreeSet<Backend>) -> Self::BackendSelector {
         <Self::BackendSelector as BackendSelection>::build(backends)
     }
 }
 
-pub struct LeastConnectionsSelector {
+pub struct FewestConnectionsSelector {
     backends: Box<[Backend]>,
 }
 
-impl BackendSelection for LeastConnectionsSelector {
-    type Iter = LeastConnectionsIter;
+impl BackendSelection for FewestConnectionsSelector {
+    type Iter = FewestConnectionsIter;
 
     fn build(backends: &BTreeSet<Backend>) -> Self {
         let backends = Vec::from_iter(backends.iter().cloned()).into_boxed_slice();
@@ -56,24 +56,24 @@ impl BackendSelection for LeastConnectionsSelector {
 
         CONNECTIONS.store(Arc::new(connections));
 
-        LeastConnectionsSelector { backends }
+        FewestConnectionsSelector { backends }
     }
 
     fn iter(self: &Arc<Self>, key: &[u8]) -> Self::Iter {
-        LeastConnectionsIter::new(self.clone(), key)
+        FewestConnectionsIter::new(self.clone(), key)
     }
 }
 
-pub struct LeastConnectionsIter {
-    least_connections: Arc<LeastConnectionsSelector>,
+pub struct FewestConnectionsIter {
+    least_connections: Arc<FewestConnectionsSelector>,
     /// The load balancer should use the first returned backend in the vast majority of cases,
     /// therefor we use a small vec to track previously returned backends. This lets us skip allocating
     /// most of the time when the iterator is used.
     yielded: SmallVec<[usize; 2]>,
 }
 
-impl LeastConnectionsIter {
-    fn new(least_connections: Arc<LeastConnectionsSelector>, _key: &[u8]) -> Self {
+impl FewestConnectionsIter {
+    fn new(least_connections: Arc<FewestConnectionsSelector>, _key: &[u8]) -> Self {
         Self {
             least_connections,
             yielded: SmallVec::new(),
@@ -81,7 +81,7 @@ impl LeastConnectionsIter {
     }
 }
 
-impl BackendIter for LeastConnectionsIter {
+impl BackendIter for FewestConnectionsIter {
     fn next(&mut self) -> Option<&Backend> {
         let conns = CONNECTIONS.load();
         let mut min_count = usize::MAX;
@@ -136,7 +136,7 @@ impl Tracing for ConnectionsTracer {
 mod tests {
     use super::*;
 
-    fn get_connection(least_connections: &Arc<LeastConnectionsSelector>) -> Option<SocketAddr> {
+    fn get_connection(least_connections: &Arc<FewestConnectionsSelector>) -> Option<SocketAddr> {
         let mut iter = least_connections.iter(&[]);
         let Some(backend) = iter.next().and_then(|b| Some(b.addr.clone())) else {
             return None;
@@ -162,7 +162,7 @@ mod tests {
             .map(|a| Backend::new(&a.to_string()).unwrap())
             .collect();
 
-        let least_connections = Arc::new(LeastConnections.build_backend_selector(&backends));
+        let least_connections = Arc::new(FewestConnections.build_backend_selector(&backends));
         backends.iter().enumerate().for_each(|(i, b)| {
             let map = CONNECTIONS.load();
             let connections = map.get(&b.addr).unwrap();

@@ -16,7 +16,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::load_balancing::selection::Strategy;
+use crate::load_balancing::strategy::Strategy;
 
 use super::LoadBalancer;
 use async_trait::async_trait;

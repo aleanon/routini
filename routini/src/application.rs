@@ -4,7 +4,7 @@ use pingora::{prelude::background_service, proxy::http_proxy_service, server::Se
 use serde::de::DeserializeOwned;
 
 use crate::{
-    load_balancing::{LoadBalancer, health_check::TcpHealthCheck, selection::Strategy},
+    load_balancing::{LoadBalancer, health_check::TcpHealthCheck, strategy::Strategy},
     proxy::LB,
     set_strategy_endpoint::SetStrategyEndpoint,
     utils::constants::SET_STRATEGY_ENDPOINT_ADDRESS,

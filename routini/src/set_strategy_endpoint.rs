@@ -8,7 +8,7 @@ use serde::de::DeserializeOwned;
 use tracing::{error, info};
 
 use crate::{
-    load_balancing::{LoadBalancer, selection::Strategy},
+    load_balancing::{LoadBalancer, strategy::Strategy},
     utils::constants::SET_STRATEGY_ENDPOINT_NAME,
 };
 

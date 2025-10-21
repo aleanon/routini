@@ -4,9 +4,10 @@ use serde::Deserialize;
 
 use crate::load_balancing::{
     Backend,
-    selection::{
-        BackendIter, BackendSelection, ConsistentSelector, FNVHashSelector, RandomSelector,
-        RoundRobin, RoundRobinSelector, Strategy, least_connections::LeastConnectionsSelector,
+    strategy::{
+        BackendIter, BackendSelection, Strategy, consistent::ConsistentSelector,
+        fewest_connections::FewestConnectionsSelector, fnv_hash::FNVHashSelector,
+        random::RandomSelector, round_robin::RoundRobinSelector,
     },
 };
 
@@ -25,9 +26,9 @@ impl Strategy for Adaptive {
 
     fn build_backend_selector(&self, backends: &BTreeSet<Backend>) -> Self::BackendSelector {
         match self {
-            Adaptive::RoundRobin => AdaptiveSelector::RoundRobin(Arc::new(
-                RoundRobin::default().build_backend_selector(backends),
-            )),
+            Adaptive::RoundRobin => {
+                AdaptiveSelector::RoundRobin(Arc::new(RoundRobinSelector::build(backends)))
+            }
             Adaptive::Random => AdaptiveSelector::Random(Arc::new(RandomSelector::build(backends))),
             Adaptive::FNVHash => {
                 AdaptiveSelector::FNVHash(Arc::new(FNVHashSelector::build(backends)))
@@ -36,7 +37,7 @@ impl Strategy for Adaptive {
                 AdaptiveSelector::Consistent(Arc::new(ConsistentSelector::build(backends)))
             }
             Adaptive::LeastConnections => AdaptiveSelector::LeastConnections(Arc::new(
-                LeastConnectionsSelector::build(backends),
+                FewestConnectionsSelector::build(backends),
             )),
         }
     }
@@ -47,7 +48,7 @@ pub enum AdaptiveSelector {
     Random(Arc<RandomSelector>),
     FNVHash(Arc<FNVHashSelector>),
     Consistent(Arc<ConsistentSelector>),
-    LeastConnections(Arc<LeastConnectionsSelector>),
+    LeastConnections(Arc<FewestConnectionsSelector>),
 }
 
 impl BackendSelection for AdaptiveSelector {
@@ -78,7 +79,7 @@ pub enum AdaptiveIter {
     Random(<RandomSelector as BackendSelection>::Iter),
     FNVHash(<FNVHashSelector as BackendSelection>::Iter),
     Consistent(<ConsistentSelector as BackendSelection>::Iter),
-    LeastConnections(<LeastConnectionsSelector as BackendSelection>::Iter),
+    LeastConnections(<FewestConnectionsSelector as BackendSelection>::Iter),
 }
 
 impl BackendIter for AdaptiveIter {

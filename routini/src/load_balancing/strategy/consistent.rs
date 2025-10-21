@@ -14,16 +14,18 @@
 
 //! Consistent Hashing
 
+pub type ConsistentSelector = KetamaHashingSelector;
+
 use super::*;
 use pingora::protocols::l4::socket::SocketAddr;
 use pingora_ketama::{Bucket, Continuum};
 use std::collections::HashMap;
 
 #[derive(Default, PartialEq)]
-pub struct KetamaHashing;
+pub struct Consistent;
 
-impl Strategy for KetamaHashing {
-    type BackendSelector = KetamaHashingSelector;
+impl Strategy for Consistent {
+    type BackendSelector = ConsistentSelector;
 
     fn build_backend_selector(&self, backends: &BTreeSet<Backend>) -> Self::BackendSelector {
         <Self::BackendSelector as BackendSelection>::build(backends)
