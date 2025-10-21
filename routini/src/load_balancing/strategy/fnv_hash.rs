@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 use crate::load_balancing::{
     Backend,
-    strategy::{Strategy, weighted::WeightedSelector},
+    strategy::{Strategy, utils::WeightedSelector},
 };
 
 pub type FNVHashSelector = WeightedSelector<fnv::FnvHasher>;

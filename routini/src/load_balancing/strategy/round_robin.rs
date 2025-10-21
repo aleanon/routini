@@ -1,13 +1,16 @@
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use serde::Deserialize;
 
 use crate::load_balancing::{
     Backend,
-    strategy::{Strategy, algorithms, weighted::WeightedSelector},
+    strategy::{SelectionAlgorithm, Strategy, utils::WeightedSelector},
 };
 
-pub type RoundRobinSelector = WeightedSelector<algorithms::RoundRobin>;
+pub type RoundRobinSelector = WeightedSelector<RoundRobinAlgo>;
 
 #[derive(PartialEq, Default, Deserialize)]
 pub struct RoundRobin;
@@ -17,6 +20,17 @@ impl Strategy for RoundRobin {
 
     fn build_backend_selector(&self, backends: &BTreeSet<Backend>) -> Self::BackendSelector {
         RoundRobinSelector::new(backends)
+    }
+}
+
+pub struct RoundRobinAlgo(AtomicUsize);
+
+impl SelectionAlgorithm for RoundRobinAlgo {
+    fn new() -> Self {
+        Self(AtomicUsize::new(0))
+    }
+    fn next(&self, _key: &[u8]) -> u64 {
+        self.0.fetch_add(1, Ordering::Relaxed) as u64
     }
 }
 

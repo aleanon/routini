@@ -1,13 +1,14 @@
 use std::collections::BTreeSet;
 
+use rand::RngCore;
 use serde::Deserialize;
 
 use crate::load_balancing::{
     Backend,
-    strategy::{Strategy, algorithms, weighted::WeightedSelector},
+    strategy::{SelectionAlgorithm, Strategy, utils::WeightedSelector},
 };
 
-pub type RandomSelector = WeightedSelector<algorithms::Random>;
+pub type RandomSelector = WeightedSelector<RandomAlgo>;
 
 #[derive(PartialEq, Default, Deserialize)]
 pub struct Random;
@@ -17,6 +18,18 @@ impl Strategy for Random {
 
     fn build_backend_selector(&self, backends: &BTreeSet<Backend>) -> Self::BackendSelector {
         RandomSelector::new(backends)
+    }
+}
+
+pub struct RandomAlgo;
+
+impl SelectionAlgorithm for RandomAlgo {
+    fn new() -> Self {
+        Self
+    }
+    fn next(&self, _key: &[u8]) -> u64 {
+        let mut rng = rand::rng();
+        rng.next_u64()
     }
 }
 

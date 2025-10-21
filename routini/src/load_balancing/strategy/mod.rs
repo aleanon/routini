@@ -15,13 +15,14 @@
 //! Backend selection interfaces and algorithms
 
 pub mod adaptive;
-pub mod algorithms;
 pub mod consistent;
 pub mod fewest_connections;
 pub mod fnv_hash;
 pub mod random;
 pub mod round_robin;
-pub mod weighted;
+// pub mod unique_iterator;
+pub mod utils;
+// pub mod weighted;
 
 pub use {
     adaptive::Adaptive, consistent::Consistent, fewest_connections::FewestConnections,
@@ -33,14 +34,12 @@ pub use {
 pub type FVNHash = fnv_hash::FNVHash;
 
 use super::Backend;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
+use std::hash::Hasher;
 use std::sync::Arc;
 
 /// A builder for a backend selector
-pub trait Strategy: PartialEq + Send + Sync
-where
-    <Self::BackendSelector as BackendSelection>::Iter: BackendIter,
-{
+pub trait Strategy: PartialEq + Send + Sync {
     type BackendSelector: BackendSelection;
 
     fn build_backend_selector(&self, backends: &BTreeSet<Backend>) -> Self::BackendSelector;
@@ -49,17 +48,14 @@ where
 /// [BackendSelection] is the interface to implement backend selection mechanisms.
 pub trait BackendSelection: Send + Sync {
     /// The [BackendIter] returned from iter() below.
-    type Iter;
-    /// The function to create a [BackendSelection] implementation.
-    // fn build(backends: &BTreeSet<Backend>) -> Self;
+    type Iter: BackendIter;
+
     /// Select backends for a given key.
     ///
     /// An [BackendIter] should be returned. The first item in the iter is the first
     /// choice backend. The user should continue to iterate over it if the first backend
     /// cannot be used due to its health or other reasons.
-    fn iter(self: &Arc<Self>, key: &[u8]) -> Self::Iter
-    where
-        Self::Iter: BackendIter;
+    fn iter(self: &Arc<Self>, key: &[u8]) -> Self::Iter;
 }
 
 /// An iterator to find the suitable backend
@@ -81,104 +77,118 @@ pub trait SelectionAlgorithm {
     fn next(&self, key: &[u8]) -> u64;
 }
 
+impl<H> SelectionAlgorithm for H
+where
+    H: Default + Hasher,
+{
+    fn new() -> Self {
+        H::default()
+    }
+    fn next(&self, key: &[u8]) -> u64 {
+        let mut hasher = H::default();
+        hasher.write(key);
+        hasher.finish()
+    }
+}
+
 // TODO: least conn
 
-/// An iterator which wraps another iterator and yields unique items. It optionally takes a max
-/// number of iterations if the wrapped iterator never returns.
-pub struct UniqueIterator<I>
-where
-    I: BackendIter,
-{
-    iter: I,
-    seen: HashSet<u64>,
-    max_iterations: usize,
-    steps: usize,
-}
+// /// An iterator which wraps another iterator and yields unique items. It optionally takes a max
+// /// number of iterations if the wrapped iterator never returns.
+// pub struct UniqueIterator<I>
+// where
+//     I: BackendIter,
+// {
+//     iter: I,
+//     seen: HashSet<u64>,
+//     max_iterations: usize,
+//     steps: usize,
+// }
 
-impl<I> UniqueIterator<I>
-where
-    I: BackendIter,
-{
-    /// Wrap a new iterator and specify the maximum number of times we want to iterate.
-    pub fn new(iter: I, max_iterations: usize) -> Self {
-        Self {
-            iter,
-            max_iterations,
-            seen: HashSet::new(),
-            steps: 0,
-        }
-    }
+// impl<I> UniqueIterator<I>
+// where
+//     I: BackendIter,
+// {
+//     /// Wrap a new iterator and specify the maximum number of times we want to iterate.
+//     pub fn new(iter: I, max_iterations: usize) -> Self {
+//         Self {
+//             iter,
+//             max_iterations,
+//             seen: HashSet::new(),
+//             steps: 0,
+//         }
+//     }
 
-    pub fn get_next(&mut self) -> Option<Backend> {
-        while let Some(item) = self.iter.next() {
-            if self.steps >= self.max_iterations {
-                return None;
-            }
-            self.steps += 1;
+//     pub fn get_next(&mut self) -> Option<Backend> {
+//         while let Some(item) = self.iter.next() {
+//             if self.steps >= self.max_iterations {
+//                 return None;
+//             }
+//             self.steps += 1;
 
-            let hash_key = item.hash_key();
-            if !self.seen.contains(&hash_key) {
-                self.seen.insert(hash_key);
-                return Some(item.clone());
-            }
-        }
+//             let hash_key = item.hash_key();
+//             if !self.seen.contains(&hash_key) {
+//                 self.seen.insert(hash_key);
+//                 return Some(item.clone());
+//             }
+//         }
 
-        None
-    }
-}
+//         None
+//     }
+// }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+// #[cfg(test)]
+// mod tests {
+//     use super::*;
 
-    struct TestIter {
-        seq: Vec<Backend>,
-        idx: usize,
-    }
-    impl TestIter {
-        fn new(input: &[&Backend]) -> Self {
-            Self {
-                seq: input.iter().cloned().cloned().collect(),
-                idx: 0,
-            }
-        }
-    }
-    impl BackendIter for TestIter {
-        fn next(&mut self) -> Option<&Backend> {
-            let idx = self.idx;
-            self.idx += 1;
-            self.seq.get(idx)
-        }
-    }
+//     struct TestIter {
+//         seq: Vec<Backend>,
+//         idx: usize,
+//     }
+//     impl TestIter {
+//         fn new(input: &[&Backend]) -> Self {
+//             Self {
+//                 seq: input.iter().cloned().cloned().collect(),
+//                 idx: 0,
+//             }
+//         }
+//     }
+//     impl BackendIter for TestIter {
+//         fn next(&mut self) -> Option<&Backend> {
+//             let idx = self.idx;
+//             self.idx += 1;
+//             self.seq.get(idx)
+//         }
+//     }
 
-    #[test]
-    fn unique_iter_max_iterations_is_correct() {
-        let b1 = Backend::new("1.1.1.1:80").unwrap();
-        let b2 = Backend::new("1.0.0.1:80").unwrap();
-        let b3 = Backend::new("1.0.0.255:80").unwrap();
-        let items = [&b1, &b2, &b3];
+//     #[test]
+//     fn unique_iter_max_iterations_is_correct() {
+//         let b1 = Backend::new("1.1.1.1:80").unwrap();
+//         let b2 = Backend::new("1.0.0.1:80").unwrap();
+//         let b3 = Backend::new("1.0.0.255:80").unwrap();
+//         let items = [&b1, &b2, &b3];
 
-        let mut all = UniqueIterator::new(TestIter::new(&items), 3);
-        assert_eq!(all.get_next(), Some(b1.clone()));
-        assert_eq!(all.get_next(), Some(b2.clone()));
-        assert_eq!(all.get_next(), Some(b3.clone()));
-        assert_eq!(all.get_next(), None);
+//         let mut all = UniqueIterator::new(TestIter::new(&items), 3);
+//         assert_eq!(all.get_next(), Some(b1.clone()));
+//         assert_eq!(all.get_next(), Some(b2.clone()));
+//         assert_eq!(all.get_next(), Some(b3.clone()));
+//         assert_eq!(all.get_next(), None);
 
-        let mut stop = UniqueIterator::new(TestIter::new(&items), 1);
-        assert_eq!(stop.get_next(), Some(b1));
-        assert_eq!(stop.get_next(), None);
-    }
+//         let mut stop = UniqueIterator::new(TestIter::new(&items), 1);
+//         assert_eq!(stop.get_next(), Some(b1));
+//         assert_eq!(stop.get_next(), None);
+//     }
 
-    #[test]
-    fn unique_iter_duplicate_items_are_filtered() {
-        let b1 = Backend::new("1.1.1.1:80").unwrap();
-        let b2 = Backend::new("1.0.0.1:80").unwrap();
-        let b3 = Backend::new("1.0.0.255:80").unwrap();
-        let items = [&b1, &b1, &b2, &b2, &b2, &b3];
+//     #[test]
+//     fn unique_iter_duplicate_items_are_filtered() {
+//         let b1 = Backend::new("1.1.1.1:80").unwrap();
+//         let b2 = Backend::new("1.0.0.1:80").unwrap();
+//         let b3 = Backend::new("1.0.0.255:80").unwrap();
+//         let items = [&b1, &b1, &b2, &b2, &b2, &b3];
 
-        let mut uniq = UniqueIterator::new(TestIter::new(&items), 10);
-        assert_eq!(uniq.get_next(), Some(b1));
-        assert_eq!(uniq.get_next(), Some(b2));
-        assert_eq!(uniq.get_next(), Some(b3));
-    }
-}
+//         let mut uniq = UniqueIterator::new(TestIter::new(&items), 10);
+//         assert_eq!(uniq.get_next(), Some(b1));
+//         assert_eq!(uniq.get_next(), Some(b2));
+//         assert_eq!(uniq.get_next(), Some(b3));
+//     }
+// }

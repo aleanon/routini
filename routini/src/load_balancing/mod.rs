@@ -20,9 +20,9 @@ pub mod strategy;
 use discovery::ServiceDiscovery;
 use health_check::Health;
 use strategy::BackendSelection;
-use strategy::UniqueIterator;
 
 use crate::load_balancing::strategy::Strategy;
+use crate::load_balancing::strategy::utils::UniqueIterator;
 
 /// [Backend] represents a server to proxy or connect to.
 #[derive(Derivative)]
