@@ -18,7 +18,7 @@ fn main() {
         "127.0.0.1:4002".to_owned(),
     ];
     let route = Route::new(
-        "/auth{*rest}",
+        "/auth/{*rest}",
         backends,
         Adaptive::RoundRobin,
         true,
