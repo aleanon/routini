@@ -53,7 +53,7 @@ impl Proxy {
             .map(|m| {
                 let value = m.value;
                 let stripped_path = if value.route_config.strip_path_prefix {
-                    m.params.get("rest").map(|s| format!("/{}", s))
+                    m.params.get("rest").map(|p| p.to_string())
                 } else {
                     None
                 };
@@ -97,12 +97,5 @@ impl ProxyHttp for Proxy {
         let mut peer = Box::new(HttpPeer::new(backend, false, String::new()));
         peer.options.tracer = Some(tracer);
         Ok(peer)
-    }
-
-    async fn request_filter(&self, _session: &mut Session, _ctx: &mut Self::CTX) -> Result<bool>
-    where
-        Self::CTX: Send + Sync,
-    {
-        Ok(false)
     }
 }

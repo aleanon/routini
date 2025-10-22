@@ -111,11 +111,12 @@ impl ApplicationBuilder {
                 let hc = TcpHealthCheck::new();
                 lb.set_health_check(hc);
             }
+
             let service_name = format!("lb updater-{}", &route.path);
             let background_service = background_service(&service_name, lb);
             let task = background_service.task();
-
             server.add_service(background_service);
+
             tracing::info!("Adding route: {}", route.path);
 
             let route_value = RouteValue {
