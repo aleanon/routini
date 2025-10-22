@@ -1,8 +1,11 @@
 use std::{io, net::Ipv4Addr};
 
 use fake::{Fake, Faker};
-use routini::{application::Application, load_balancing::strategy::Strategy};
-use serde::de::DeserializeOwned;
+use routini::{
+    application::{Route, RouteConfig, application},
+    load_balancing::strategy::Adaptive,
+    utils::constants::DEFAULT_MAX_ALGORITHM_ITERATIONS,
+};
 use tokio::net::TcpListener;
 
 pub struct TestApp {
@@ -12,10 +15,7 @@ pub struct TestApp {
 }
 
 impl TestApp {
-    pub async fn new<S>(selection_strategy: S) -> io::Result<Self>
-    where
-        S: Strategy + 'static + DeserializeOwned,
-    {
+    pub async fn new(selection_strategy: Adaptive) -> io::Result<Self> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         let server_address = format!("http://{}", listener.local_addr()?);
 
@@ -35,7 +35,18 @@ impl TestApp {
 
         let backend_addr_clone = backend_addresses.clone();
         std::thread::spawn(move || {
-            Application::new(listener, backend_addr_clone, selection_strategy).run();
+            let route = Route::new(
+                "/health",
+                backend_addr_clone,
+                selection_strategy,
+                true,
+                DEFAULT_MAX_ALGORITHM_ITERATIONS,
+                RouteConfig {
+                    strip_path_prefix: false,
+                },
+            );
+
+            application(listener).add_route(route).build().run_forever()
         });
 
         let http_client = reqwest::Client::builder()

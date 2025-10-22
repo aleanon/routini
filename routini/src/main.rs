@@ -1,6 +1,10 @@
 use routini::{
-    application::Application, load_balancing::strategy::adaptive::Adaptive,
-    utils::tracing::init_tracing,
+    application::{Route, RouteConfig, application},
+    load_balancing::strategy::Adaptive,
+    utils::{
+        constants::{DEFAULT_MAX_ALGORITHM_ITERATIONS, SET_STRATEGY_ENDPOINT_ADDRESS},
+        tracing::init_tracing,
+    },
 };
 use std::net::TcpListener;
 
@@ -13,7 +17,20 @@ fn main() {
         "127.0.0.1:4001".to_owned(),
         "127.0.0.1:4002".to_owned(),
     ];
+    let route = Route::new(
+        "/{*rest}",
+        backends,
+        Adaptive::RoundRobin,
+        true,
+        DEFAULT_MAX_ALGORITHM_ITERATIONS,
+        RouteConfig {
+            strip_path_prefix: true,
+        },
+    );
 
-    let app = Application::new(listener, backends, Adaptive::Consistent);
-    app.run();
+    application(listener)
+        .add_route(route)
+        .set_strategy_endpoint(SET_STRATEGY_ENDPOINT_ADDRESS.to_string())
+        .build()
+        .run_forever();
 }

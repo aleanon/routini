@@ -1,48 +1,51 @@
-use std::sync::Arc;
+use std::fmt::Display;
 
 use http::{Method, Response, StatusCode};
 use pingora::{
     apps::http_app::ServeHttp, protocols::http::ServerSession, services::listening::Service,
 };
-use serde::de::DeserializeOwned;
+use serde::Deserialize;
 use tracing::{error, info};
 
 use crate::{
-    load_balancing::{LoadBalancer, strategy::Strategy},
-    utils::constants::SET_STRATEGY_ENDPOINT_NAME,
+    load_balancing::strategy::Adaptive, proxy::Proxy, utils::constants::SET_STRATEGY_ENDPOINT_NAME,
 };
+
+impl Display for Adaptive {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Adaptive::RoundRobin => write!(f, "RoundRobin"),
+            Adaptive::Random => write!(f, "Random"),
+            Adaptive::FNVHash => write!(f, "FNVHash"),
+            Adaptive::FewestConnections => write!(f, "FewestConnection"),
+            Adaptive::Consistent => write!(f, "Consistent"),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct NewStrategy {
+    path: String,
+    strategy: Adaptive,
+}
 
 /// Temporary endpoint for updating the load balancer strategy,
 /// This should be automatically decided by an internal task
-#[derive(Clone)]
-pub struct SetStrategyEndpoint<S>
-where
-    S: Strategy + 'static,
-{
-    pub load_balancer: Arc<LoadBalancer<S>>,
+pub struct SetStrategyEndpoint {
+    pub router: Proxy,
 }
 
-impl<S> SetStrategyEndpoint<S>
-where
-    S: Strategy + 'static + DeserializeOwned,
-{
-    pub fn service(load_balancer: Arc<LoadBalancer<S>>, address: &str) -> Service<Self> {
-        let mut service = Service::new(
-            SET_STRATEGY_ENDPOINT_NAME.to_string(),
-            Self { load_balancer },
-        );
+impl SetStrategyEndpoint {
+    pub fn service(router: Proxy, address: &str) -> Service<Self> {
+        let mut service = Service::new(SET_STRATEGY_ENDPOINT_NAME.to_string(), Self { router });
         service.add_tcp(address);
         service
     }
 }
 
 #[async_trait::async_trait]
-impl<S> ServeHttp for SetStrategyEndpoint<S>
-where
-    S: Strategy + 'static + DeserializeOwned,
-{
+impl ServeHttp for SetStrategyEndpoint {
     async fn response(&self, http_session: &mut ServerSession) -> Response<Vec<u8>> {
-        info!("request received");
         match http_session {
             ServerSession::H1(session) => {
                 let request_header = session.req_header();
@@ -58,16 +61,22 @@ where
                     }
                 };
                 let Some(body) = body else {
-                    error!("Failed to read body bytes");
+                    error!("Empty body");
                     return response(StatusCode::INTERNAL_SERVER_ERROR);
                 };
 
-                match serde_json::from_slice::<S>(&body) {
-                    Ok(strategy) => {
-                        self.load_balancer.update_strategy(strategy);
-                        info!("Strategy updated");
-                        response(StatusCode::OK)
-                    }
+                match serde_json::from_slice::<NewStrategy>(&body) {
+                    Ok(NewStrategy { path, strategy }) => match self.router.route(&path) {
+                        Ok((route_value, _)) => {
+                            route_value.lb.update_strategy(strategy.clone());
+                            info!("Strategy updated to {}", strategy);
+                            response(StatusCode::OK)
+                        }
+                        Err(err) => {
+                            error!("{err}");
+                            response(StatusCode::BAD_REQUEST)
+                        }
+                    },
                     Err(_) => response(StatusCode::BAD_REQUEST),
                 }
             }
