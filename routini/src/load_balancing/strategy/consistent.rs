@@ -19,9 +19,10 @@ pub type ConsistentSelector = KetamaHashingSelector;
 use super::*;
 use pingora::protocols::l4::socket::SocketAddr;
 use pingora_ketama::{Bucket, Continuum};
+use serde::Deserialize;
 use std::collections::HashMap;
 
-#[derive(Default, PartialEq)]
+#[derive(Default, PartialEq, Deserialize)]
 pub struct Consistent;
 
 impl Strategy for Consistent {

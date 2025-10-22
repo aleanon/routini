@@ -11,14 +11,14 @@ use crate::load_balancing::{
     },
 };
 
-#[derive(Default, PartialEq, Deserialize)]
+#[derive(Default, PartialEq, Deserialize, Clone)]
 pub enum Adaptive {
     #[default]
     RoundRobin,
     Random,
     FNVHash,
     Consistent,
-    LeastConnections,
+    FewestConnections,
 }
 
 impl Strategy for Adaptive {
@@ -38,7 +38,7 @@ impl Strategy for Adaptive {
             Adaptive::Consistent => {
                 AdaptiveSelector::Consistent(Arc::new(Consistent.build_backend_selector(backends)))
             }
-            Adaptive::LeastConnections => AdaptiveSelector::LeastConnections(Arc::new(
+            Adaptive::FewestConnections => AdaptiveSelector::LeastConnections(Arc::new(
                 FewestConnections.build_backend_selector(backends),
             )),
         }

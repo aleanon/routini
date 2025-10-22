@@ -1,12 +1,12 @@
 use crate::helpers::TestApp;
 use reqwest::StatusCode;
-use routini::load_balancing::strategy::round_robin::RoundRobin;
+use routini::load_balancing::strategy::Adaptive;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 #[tokio::test]
 async fn should_distribute_requests_evenly_among_backends() {
-    let app = match TestApp::new(RoundRobin).await {
+    let app = match TestApp::new(Adaptive::RoundRobin).await {
         Ok(app) => app,
         Err(err) => {
             eprintln!("Skipping test: unable to bootstrap test app ({err})");
@@ -40,7 +40,7 @@ async fn should_distribute_requests_evenly_among_backends() {
 
 #[tokio::test]
 async fn should_distribute_requests_evenly_with_concurrent_requests() {
-    let app = match TestApp::new(RoundRobin::default()).await {
+    let app = match TestApp::new(Adaptive::RoundRobin).await {
         Ok(app) => Arc::new(app),
         Err(err) => {
             eprintln!("Skipping test: unable to bootstrap test app ({err})");

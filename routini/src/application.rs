@@ -1,65 +1,153 @@
-use std::{net::TcpListener, time::Duration};
+use std::net::TcpListener;
 
-use pingora::{prelude::background_service, proxy::http_proxy_service, server::Server};
-use serde::de::DeserializeOwned;
-
-use crate::{
-    load_balancing::{LoadBalancer, health_check::TcpHealthCheck, strategy::Strategy},
-    proxy::LB,
-    set_strategy_endpoint::SetStrategyEndpoint,
-    utils::constants::SET_STRATEGY_ENDPOINT_ADDRESS,
+use matchit::Router;
+use pingora::{
+    prelude::{Opt, background_service},
+    proxy::http_proxy_service,
+    server::{Server, configuration::ServerConf},
 };
 
-pub struct Application {
-    server: Server,
+use crate::{
+    load_balancing::{LoadBalancer, health_check::TcpHealthCheck, strategy::Adaptive},
+    proxy::{Proxy, RouteValue},
+    set_strategy_endpoint::SetStrategyEndpoint,
+};
+
+pub fn application(listener: TcpListener) -> ApplicationBuilder {
+    let address = listener
+        .local_addr()
+        .expect("Invalid socket address")
+        .to_string();
+
+    ApplicationBuilder {
+        address,
+        routes: Vec::new(),
+        set_strategy_endpoint: None,
+        server_config: None,
+        server_options: None,
+    }
 }
 
-impl Application {
-    pub fn new<S>(
-        listener: TcpListener,
+pub struct RouteConfig {
+    /// Strips the matching part of the path
+    /// if we add a route /auth/{*rest}
+    /// then we make a request to /auth/health,
+    /// /auth will be stripped and the backend will receive the request
+    /// with path /health
+    pub strip_path_prefix: bool,
+}
+
+pub struct Route {
+    pub path: String,
+    pub backends: Vec<String>,
+    pub lb_strategy: Adaptive,
+    pub include_health_check: bool,
+    pub max_iterations: usize,
+    pub route_config: RouteConfig,
+}
+
+impl Route {
+    pub fn new(
+        path: impl ToString,
         backends: impl IntoIterator<Item = String>,
-        strategy: S,
-    ) -> Self
-    where
-        S: Strategy + 'static + DeserializeOwned,
-    {
-        let mut server = Server::new(None).expect("Failed to create server");
-        server.bootstrap();
+        lb_strategy: Adaptive,
+        include_health_check: bool,
+        max_iterations: usize,
+        route_config: RouteConfig,
+    ) -> Self {
+        Route {
+            path: path.to_string(),
+            backends: backends.into_iter().collect(),
+            lb_strategy,
+            include_health_check,
+            max_iterations,
+            route_config,
+        }
+    }
+}
 
-        let mut lb = LoadBalancer::try_from_iter_with_strategy(backends, strategy)
-            .expect("Failed to create backends from addresses");
-
-        let hc = TcpHealthCheck::new();
-        lb.set_health_check(hc);
-        lb.health_check_frequency = Some(Duration::from_secs(1));
-
-        let background = background_service("lb_updater", lb);
-        let handle = background.task();
-        server.add_service(background);
-
-        let lb = LB {
-            load_balancer: handle.clone(),
-        };
-
-        let update_strategy_endpoint =
-            SetStrategyEndpoint::service(handle, SET_STRATEGY_ENDPOINT_ADDRESS);
-
-        let mut lb_service = http_proxy_service(&server.configuration, lb);
-
-        let socket_addr = listener
-            .local_addr()
-            .expect("Failed to get address from listener")
-            .to_string();
-
-        lb_service.add_tcp(&socket_addr);
-
-        server.add_service(update_strategy_endpoint);
-        server.add_service(lb_service);
-
-        Self { server }
+pub struct ApplicationBuilder {
+    address: String,
+    server_options: Option<Opt>,
+    server_config: Option<ServerConf>,
+    routes: Vec<Route>,
+    set_strategy_endpoint: Option<String>,
+}
+impl ApplicationBuilder {
+    pub fn add_route(mut self, route: impl Into<Route>) -> Self {
+        self.routes.push(route.into());
+        self
     }
 
+    pub fn options(mut self, options: Opt) -> Self {
+        self.server_options = Some(options);
+        self
+    }
+
+    pub fn server_config(mut self, config: ServerConf) -> Self {
+        self.server_config = Some(config);
+        self
+    }
+
+    pub fn set_strategy_endpoint(mut self, addr: String) -> Self {
+        self.set_strategy_endpoint = Some(addr);
+        self
+    }
+
+    pub fn build(self) -> Server {
+        assert!(!self.routes.is_empty(), "requires at least one route");
+        let mut server = Server::new_with_opt_and_conf(
+            self.server_options,
+            self.server_config.unwrap_or_default(),
+        );
+
+        let mut routes = Router::new();
+        for route in self.routes {
+            let mut lb =
+                LoadBalancer::try_from_iter_with_strategy(route.backends, route.lb_strategy)
+                    .expect("Failed to parse backend addresses");
+
+            if route.include_health_check {
+                let hc = TcpHealthCheck::new();
+                lb.set_health_check(hc);
+            }
+            let service_name = format!("lb updater-{}", &route.path);
+            let background_service = background_service(&service_name, lb);
+            let task = background_service.task();
+
+            server.add_service(background_service);
+            tracing::info!("Adding route: {}", route.path);
+
+            let route_value = RouteValue {
+                lb: task,
+                max_iterations: route.max_iterations,
+                route_config: route.route_config,
+            };
+
+            routes
+                .insert(route.path, route_value)
+                .expect("Invalid route");
+        }
+        let router = Proxy::new(routes);
+
+        if let Some(endpoint_address) = self.set_strategy_endpoint {
+            let endpoint = SetStrategyEndpoint::service(router.clone(), &endpoint_address);
+            server.add_service(endpoint);
+        }
+
+        let mut router_service = http_proxy_service(&server.configuration, router);
+        router_service.add_tcp(&self.address);
+        server.add_service(router_service);
+
+        server.bootstrap();
+        server
+    }
+}
+
+pub struct Application(Server);
+
+impl Application {
     pub fn run(self) {
-        self.server.run_forever()
+        self.0.run_forever()
     }
 }
