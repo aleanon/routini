@@ -2,8 +2,8 @@ use std::{io, net::Ipv4Addr};
 
 use fake::{Fake, Faker};
 use routini::{
-    application::{Route, RouteConfig, application},
     load_balancing::strategy::Adaptive,
+    server_builder::{Route, RouteConfig, proxy_server},
     utils::constants::DEFAULT_MAX_ALGORITHM_ITERATIONS,
 };
 use tokio::net::TcpListener;
@@ -46,7 +46,10 @@ impl TestApp {
                 },
             );
 
-            application(listener).add_route(route).build().run_forever()
+            proxy_server(listener)
+                .add_route(route)
+                .build()
+                .run_forever();
         });
 
         let http_client = reqwest::Client::builder()

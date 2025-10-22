@@ -1,11 +1,7 @@
 use std::net::TcpListener;
 
 use matchit::Router;
-use pingora::{
-    prelude::{Opt, background_service},
-    proxy::http_proxy_service,
-    server::{Server, configuration::ServerConf},
-};
+use pingora::{prelude::background_service, proxy::http_proxy_service, server::Server};
 
 use crate::{
     load_balancing::{LoadBalancer, health_check::TcpHealthCheck, strategy::Adaptive},
@@ -13,18 +9,18 @@ use crate::{
     set_strategy_endpoint::SetStrategyEndpoint,
 };
 
-pub fn application(listener: TcpListener) -> ApplicationBuilder {
+pub type Application = Server;
+
+pub fn proxy_server(listener: TcpListener) -> ServerBuilder {
     let address = listener
         .local_addr()
         .expect("Invalid socket address")
         .to_string();
 
-    ApplicationBuilder {
+    ServerBuilder {
         address,
         routes: Vec::new(),
         set_strategy_endpoint: None,
-        server_config: None,
-        server_options: None,
     }
 }
 
@@ -66,26 +62,14 @@ impl Route {
     }
 }
 
-pub struct ApplicationBuilder {
+pub struct ServerBuilder {
     address: String,
-    server_options: Option<Opt>,
-    server_config: Option<ServerConf>,
     routes: Vec<Route>,
     set_strategy_endpoint: Option<String>,
 }
-impl ApplicationBuilder {
+impl ServerBuilder {
     pub fn add_route(mut self, route: impl Into<Route>) -> Self {
         self.routes.push(route.into());
-        self
-    }
-
-    pub fn options(mut self, options: Opt) -> Self {
-        self.server_options = Some(options);
-        self
-    }
-
-    pub fn server_config(mut self, config: ServerConf) -> Self {
-        self.server_config = Some(config);
         self
     }
 
@@ -96,10 +80,7 @@ impl ApplicationBuilder {
 
     pub fn build(self) -> Server {
         assert!(!self.routes.is_empty(), "requires at least one route");
-        let mut server = Server::new_with_opt_and_conf(
-            self.server_options,
-            self.server_config.unwrap_or_default(),
-        );
+        let mut server = Server::new(None).expect("Unable to create server instance");
 
         let mut routes = Router::new();
         for route in self.routes {
@@ -142,13 +123,5 @@ impl ApplicationBuilder {
 
         server.bootstrap();
         server
-    }
-}
-
-pub struct Application(Server);
-
-impl Application {
-    pub fn run(self) {
-        self.0.run_forever()
     }
 }
