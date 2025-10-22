@@ -1,6 +1,6 @@
 use routini::{
-    application::{Route, RouteConfig, application},
     load_balancing::strategy::Adaptive,
+    server_builder::{Route, RouteConfig, proxy_server},
     utils::{
         constants::{DEFAULT_MAX_ALGORITHM_ITERATIONS, SET_STRATEGY_ENDPOINT_ADDRESS},
         tracing::init_tracing,
@@ -28,7 +28,7 @@ fn main() {
         },
     );
 
-    application(listener)
+    proxy_server(listener)
         .add_route(route)
         .set_strategy_endpoint(SET_STRATEGY_ENDPOINT_ADDRESS.to_string())
         .build()

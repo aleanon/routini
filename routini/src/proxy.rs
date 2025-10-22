@@ -10,11 +10,11 @@ use pingora::{
 };
 
 use crate::{
-    application::RouteConfig,
     load_balancing::{
         LoadBalancer,
         strategy::{Adaptive, fewest_connections::ConnectionsTracer},
     },
+    server_builder::RouteConfig,
 };
 
 type MaxIterations = usize;
