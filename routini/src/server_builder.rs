@@ -1,4 +1,7 @@
-use std::{net::TcpListener, sync::LazyLock};
+use std::{
+    net::{SocketAddr, TcpListener, ToSocketAddrs},
+    sync::LazyLock,
+};
 
 use color_eyre::eyre::{Result, eyre};
 use matchit::Router;
@@ -9,6 +12,7 @@ use crate::{
     load_balancing::{LoadBalancer, health_check::TcpHealthCheck, strategy::Adaptive},
     proxy::{Proxy, RouteValue},
     set_strategy_endpoint::SetStrategyEndpoint,
+    utils::constants::DEFAULT_MAX_ALGORITHM_ITERATIONS,
 };
 
 const PATH_REGEX_PATTERN: &str = r"^/[^*]*\*?$";
@@ -32,16 +36,24 @@ pub fn proxy_server(listener: TcpListener) -> ServerBuilder {
 
 pub struct RouteConfig {
     /// Strips the matching part of the path
-    /// if we add a route /auth/{*rest}
+    /// if we add a route /auth/*
     /// then we make a request to /auth/health,
     /// /auth will be stripped and the backend will receive the request
     /// with path /health
     pub strip_path_prefix: bool,
 }
 
+impl Default for RouteConfig {
+    fn default() -> Self {
+        Self {
+            strip_path_prefix: true,
+        }
+    }
+}
+
 pub struct Route {
     pub path: String,
-    pub backends: Vec<String>,
+    pub backends: Vec<SocketAddr>,
     pub lb_strategy: Adaptive,
     pub include_health_check: bool,
     pub max_iterations: usize,
@@ -49,29 +61,58 @@ pub struct Route {
 }
 
 impl Route {
-    pub fn new(
-        path: &str,
-        backends: impl IntoIterator<Item = String>,
+    pub fn new<A: ToSocketAddrs>(
+        path: impl AsRef<str>,
+        backends: impl IntoIterator<Item = A>,
         lb_strategy: Adaptive,
-        include_health_check: bool,
-        max_iterations: usize,
-        route_config: RouteConfig,
     ) -> Result<Self> {
-        if !PATH_REGEX.is_match(path) {
+        if !PATH_REGEX.is_match(path.as_ref()) {
             return Err(eyre!(
                 "Invalid path, it must start with '/', have at most one * and any eventual * must be at the end of the string"
             ));
         }
+        let path = path.as_ref().replacen("*", "{*rest}", 1);
 
-        let path = path.replacen("*", "{*rest}", 1);
+        let backends = backends.into_iter().try_fold(Vec::new(), |mut acc, a| {
+            let addrs = a.to_socket_addrs()?;
+            acc.extend(addrs);
+            Ok::<_, color_eyre::Report>(acc)
+        })?;
+        if backends.is_empty() {
+            return Err(eyre!("Must provide at least one backend"));
+        }
+
         Ok(Route {
             path,
-            backends: backends.into_iter().collect(),
+            backends,
             lb_strategy,
-            include_health_check,
-            max_iterations,
-            route_config,
+            include_health_check: true,
+            max_iterations: DEFAULT_MAX_ALGORITHM_ITERATIONS,
+            route_config: RouteConfig::default(),
         })
+    }
+
+    /// Default: [DEFAULT_MAX_ALGORITHM_ITERATIONS]
+    pub fn max_iterations(mut self, max_iterations: usize) -> Self {
+        self.max_iterations = max_iterations;
+        self
+    }
+
+    /// Default: true
+    pub fn include_health_check(mut self, include_health_check: bool) -> Self {
+        self.include_health_check = include_health_check;
+        self
+    }
+
+    /// #### Default:
+    /// ```rust
+    /// RouteConfig {
+    ///     strip_prefix: true,
+    /// }
+    /// ```
+    pub fn route_config(mut self, config: RouteConfig) -> Self {
+        self.route_config = config;
+        self
     }
 }
 

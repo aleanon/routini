@@ -170,7 +170,7 @@ mod tests {
         assert!(result.is_ok());
         let (route_value, stripped_path) = result.unwrap();
         assert!(route_value.route_config.strip_path_prefix);
-        assert_eq!(stripped_path, Some("login".to_string()));
+        assert_eq!(stripped_path, Some("/login".to_string()));
     }
 
     #[test]
@@ -186,7 +186,7 @@ mod tests {
         assert!(result.is_ok());
         let (route_value, stripped_path) = result.unwrap();
         assert!(route_value.route_config.strip_path_prefix);
-        assert_eq!(stripped_path, Some("users/123/profile".to_string()));
+        assert_eq!(stripped_path, Some("/users/123/profile".to_string()));
     }
 
     #[test]
@@ -229,7 +229,7 @@ mod tests {
         assert!(result.is_ok());
         let (route_value, stripped) = result.unwrap();
         assert!(route_value.route_config.strip_path_prefix);
-        assert_eq!(stripped, Some("logout".to_string()));
+        assert_eq!(stripped, Some("/logout".to_string()));
     }
 
     #[test]
@@ -283,6 +283,6 @@ mod tests {
 
         assert!(result.is_ok());
         let (_, stripped_path) = result.unwrap();
-        assert_eq!(stripped_path, Some("query?q=test".to_string()));
+        assert_eq!(stripped_path, Some("/query?q=test".to_string()));
     }
 }

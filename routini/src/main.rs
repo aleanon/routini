@@ -1,11 +1,8 @@
 use color_eyre::eyre::Result;
 use routini::{
     load_balancing::strategy::Adaptive,
-    server_builder::{Route, RouteConfig, proxy_server},
-    utils::{
-        constants::{DEFAULT_MAX_ALGORITHM_ITERATIONS, SET_STRATEGY_ENDPOINT_ADDRESS},
-        tracing::init_tracing,
-    },
+    server_builder::{Route, proxy_server},
+    utils::{constants::SET_STRATEGY_ENDPOINT_ADDRESS, tracing::init_tracing},
 };
 use std::net::TcpListener;
 
@@ -19,16 +16,7 @@ fn main() -> Result<()> {
         "127.0.0.1:4001".to_owned(),
         "127.0.0.1:4002".to_owned(),
     ];
-    let route = Route::new(
-        "/auth/*",
-        backends,
-        Adaptive::RoundRobin,
-        true,
-        DEFAULT_MAX_ALGORITHM_ITERATIONS,
-        RouteConfig {
-            strip_path_prefix: true,
-        },
-    )?;
+    let route = Route::new("/auth/*", backends, Adaptive::RoundRobin)?;
 
     proxy_server(listener)
         .add_route(route)
