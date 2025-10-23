@@ -1,7 +1,4 @@
-use std::{
-    net::{SocketAddr, TcpListener, ToSocketAddrs},
-    sync::LazyLock,
-};
+use std::{net::TcpListener, sync::LazyLock};
 
 use color_eyre::eyre::{Result, eyre};
 use matchit::Router;
@@ -53,7 +50,7 @@ impl Default for RouteConfig {
 
 pub struct Route {
     pub path: String,
-    pub backends: Vec<SocketAddr>,
+    pub backends: Vec<String>,
     pub lb_strategy: Adaptive,
     pub include_health_check: bool,
     pub max_iterations: usize,
@@ -61,7 +58,7 @@ pub struct Route {
 }
 
 impl Route {
-    pub fn new<A: ToSocketAddrs>(
+    pub fn new<A: ToString>(
         path: impl AsRef<str>,
         backends: impl IntoIterator<Item = A>,
         lb_strategy: Adaptive,
@@ -73,11 +70,11 @@ impl Route {
         }
         let path = path.as_ref().replacen("*", "{*rest}", 1);
 
-        let backends = backends.into_iter().try_fold(Vec::new(), |mut acc, a| {
-            let addrs = a.to_socket_addrs()?;
-            acc.extend(addrs);
-            Ok::<_, color_eyre::Report>(acc)
-        })?;
+        let backends = backends
+            .into_iter()
+            .map(|a| a.to_string())
+            .collect::<Vec<_>>();
+
         if backends.is_empty() {
             return Err(eyre!("Must provide at least one backend"));
         }
@@ -177,5 +174,151 @@ impl ServerBuilder {
 
         server.bootstrap();
         server
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_route_valid_simple_path() {
+        let route = Route::new("/api", vec!["127.0.0.1:8080"], Adaptive::default());
+        assert!(route.is_ok());
+        let route = route.unwrap();
+        assert_eq!(route.path, "/api");
+        assert_eq!(route.backends.len(), 1);
+    }
+
+    #[test]
+    fn test_route_valid_path_with_wildcard() {
+        let route = Route::new("/api/*", vec!["127.0.0.1:8080"], Adaptive::default());
+        assert!(route.is_ok());
+        let route = route.unwrap();
+        assert_eq!(route.path, "/api/{*rest}");
+    }
+
+    #[test]
+    fn test_route_valid_nested_path_with_wildcard() {
+        let route = Route::new("/api/v1/*", vec!["127.0.0.1:8080"], Adaptive::default());
+        assert!(route.is_ok());
+        let route = route.unwrap();
+        assert_eq!(route.path, "/api/v1/{*rest}");
+    }
+
+    #[test]
+    fn test_route_valid_root_path() {
+        let route = Route::new("/", vec!["127.0.0.1:8080"], Adaptive::default());
+        assert!(route.is_ok());
+    }
+
+    #[test]
+    fn test_route_invalid_path_no_leading_slash() {
+        let route = Route::new("api", vec!["127.0.0.1:8080"], Adaptive::default());
+        assert!(route.is_err());
+        if let Err(err) = route {
+            assert!(err.to_string().contains("Invalid path"));
+            assert!(err.to_string().contains("must start with '/'"));
+        }
+    }
+
+    #[test]
+    fn test_route_invalid_path_wildcard_not_at_end() {
+        let route = Route::new("/api/*/users", vec!["127.0.0.1:8080"], Adaptive::default());
+        assert!(route.is_err());
+        if let Err(err) = route {
+            assert!(err.to_string().contains("Invalid path"));
+        }
+    }
+
+    #[test]
+    fn test_route_invalid_path_multiple_wildcards() {
+        let route = Route::new("/api/**", vec!["127.0.0.1:8080"], Adaptive::default());
+        assert!(route.is_err());
+        if let Err(err) = route {
+            assert!(err.to_string().contains("Invalid path"));
+            assert!(err.to_string().contains("at most one *"));
+        }
+    }
+
+    #[test]
+    fn test_route_invalid_empty_backends() {
+        let empty: Vec<&str> = vec![];
+        let route = Route::new("/api", empty, Adaptive::default());
+        assert!(route.is_err());
+        if let Err(err) = route {
+            assert!(
+                err.to_string()
+                    .contains("Must provide at least one backend")
+            );
+        }
+    }
+
+    #[test]
+    fn test_route_multiple_valid_backends() {
+        let route = Route::new(
+            "/api",
+            vec!["127.0.0.1:8080", "127.0.0.1:8081", "127.0.0.1:8082"],
+            Adaptive::default(),
+        );
+        assert!(route.is_ok());
+        let route = route.unwrap();
+        assert_eq!(route.backends.len(), 3);
+    }
+
+    #[test]
+    fn test_route_builder_pattern() {
+        let route = Route::new("/api/*", vec!["127.0.0.1:8080"], Adaptive::default())
+            .unwrap()
+            .max_iterations(20)
+            .include_health_check(false)
+            .route_config(RouteConfig {
+                strip_path_prefix: false,
+            });
+
+        assert_eq!(route.max_iterations, 20);
+        assert_eq!(route.include_health_check, false);
+        assert_eq!(route.route_config.strip_path_prefix, false);
+    }
+
+    #[test]
+    fn test_route_default_values() {
+        let route = Route::new("/api", vec!["127.0.0.1:8080"], Adaptive::default()).unwrap();
+
+        assert_eq!(route.max_iterations, DEFAULT_MAX_ALGORITHM_ITERATIONS);
+        assert_eq!(route.include_health_check, true);
+        assert_eq!(route.route_config.strip_path_prefix, true);
+    }
+
+    #[test]
+    fn test_route_config_default() {
+        let config = RouteConfig::default();
+        assert_eq!(config.strip_path_prefix, true);
+    }
+
+    #[test]
+    fn test_route_path_with_segments() {
+        let route = Route::new(
+            "/api/v1/users/{id}/*",
+            vec!["127.0.0.1:8080"],
+            Adaptive::default(),
+        );
+        assert!(route.is_ok());
+        let route = route.unwrap();
+        assert_eq!(route.path, "/api/v1/users/{id}/{*rest}");
+    }
+
+    #[test]
+    fn test_path_regex_validation() {
+        // Direct regex tests
+        assert!(PATH_REGEX.is_match("/api"));
+        assert!(PATH_REGEX.is_match("/api/*"));
+        assert!(PATH_REGEX.is_match("/api/v1/users/*"));
+        assert!(PATH_REGEX.is_match("/"));
+
+        assert!(!PATH_REGEX.is_match("api"));
+        assert!(!PATH_REGEX.is_match("/api/*/users"));
+        assert!(!PATH_REGEX.is_match("/api/**"));
+        assert!(!PATH_REGEX.is_match("/**/api"));
     }
 }
