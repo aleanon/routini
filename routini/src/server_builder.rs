@@ -1,13 +1,19 @@
-use std::net::TcpListener;
+use std::{net::TcpListener, sync::LazyLock};
 
+use color_eyre::eyre::{Result, eyre};
 use matchit::Router;
 use pingora::{prelude::background_service, proxy::http_proxy_service, server::Server};
+use regex::Regex;
 
 use crate::{
     load_balancing::{LoadBalancer, health_check::TcpHealthCheck, strategy::Adaptive},
     proxy::{Proxy, RouteValue},
     set_strategy_endpoint::SetStrategyEndpoint,
 };
+
+const PATH_REGEX_PATTERN: &str = r"^/[^*]*\*?$";
+static PATH_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| regex::Regex::new(PATH_REGEX_PATTERN).unwrap());
 
 pub type Application = Server;
 
@@ -44,21 +50,28 @@ pub struct Route {
 
 impl Route {
     pub fn new(
-        path: impl ToString,
+        path: &str,
         backends: impl IntoIterator<Item = String>,
         lb_strategy: Adaptive,
         include_health_check: bool,
         max_iterations: usize,
         route_config: RouteConfig,
-    ) -> Self {
-        Route {
-            path: path.to_string(),
+    ) -> Result<Self> {
+        if !PATH_REGEX.is_match(path) {
+            return Err(eyre!(
+                "Invalid path, it must start with '/', have at most one * and any eventual * must be at the end of the string"
+            ));
+        }
+
+        let path = path.replacen("*", "{*rest}", 1);
+        Ok(Route {
+            path,
             backends: backends.into_iter().collect(),
             lb_strategy,
             include_health_check,
             max_iterations,
             route_config,
-        }
+        })
     }
 }
 
