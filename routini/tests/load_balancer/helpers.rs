@@ -44,7 +44,8 @@ impl TestApp {
                 RouteConfig {
                     strip_path_prefix: false,
                 },
-            );
+            )
+            .expect("Failed to construct route");
 
             proxy_server(listener)
                 .add_route(route)

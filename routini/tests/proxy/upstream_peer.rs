@@ -20,7 +20,8 @@ async fn test_upstream_peer_not_found_route() {
         RouteConfig {
             strip_path_prefix: false,
         },
-    );
+    )
+    .expect("Invalid route");
 
     let app = TestApp::new(vec![route]).await.unwrap();
 
@@ -48,7 +49,8 @@ async fn test_upstream_peer_with_real_backends() {
         RouteConfig {
             strip_path_prefix: false,
         },
-    );
+    )
+    .expect("Invalid route");
 
     let app = TestApp::new(vec![route]).await.unwrap();
 
@@ -68,7 +70,7 @@ async fn test_upstream_peer_path_stripping() {
     let backend_addresses = TestApp::create_backends(1).await.unwrap();
 
     let route = Route::new(
-        "/api/{*rest}",
+        "/api/*",
         backend_addresses,
         Adaptive::default(),
         false,
@@ -76,7 +78,8 @@ async fn test_upstream_peer_path_stripping() {
         RouteConfig {
             strip_path_prefix: true,
         },
-    );
+    )
+    .expect("Invalid route");
 
     let app = TestApp::new(vec![route]).await.unwrap();
 
@@ -108,10 +111,11 @@ async fn test_upstream_peer_multiple_routes() {
         RouteConfig {
             strip_path_prefix: false,
         },
-    );
+    )
+    .expect("Invalid route");
 
     let route2 = Route::new(
-        "/api/{*rest}",
+        "/api/*",
         vec![addr2],
         Adaptive::default(),
         false,
@@ -119,7 +123,8 @@ async fn test_upstream_peer_multiple_routes() {
         RouteConfig {
             strip_path_prefix: true,
         },
-    );
+    )
+    .expect("Invalid route");
 
     let app = TestApp::new(vec![route1, route2]).await.unwrap();
 
@@ -154,7 +159,8 @@ async fn test_upstream_peer_load_balancing() {
         RouteConfig {
             strip_path_prefix: false,
         },
-    );
+    )
+    .expect("Invalid route");
 
     let app = TestApp::new(vec![route]).await.unwrap();
 
