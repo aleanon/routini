@@ -2,7 +2,6 @@ use reqwest::StatusCode;
 use routini::{
     load_balancing::strategy::Adaptive,
     server_builder::{Route, RouteConfig},
-    utils::constants::DEFAULT_MAX_ALGORITHM_ITERATIONS,
 };
 
 use super::helpers::TestApp;
@@ -11,17 +10,12 @@ use super::helpers::TestApp;
 #[tokio::test]
 async fn test_upstream_peer_not_found_route() {
     let backends = vec!["127.0.0.1:8001".to_string()];
-    let route = Route::new(
-        "/api",
-        backends,
-        Adaptive::default(),
-        false,
-        DEFAULT_MAX_ALGORITHM_ITERATIONS,
-        RouteConfig {
+    let route = Route::new("/api", backends, Adaptive::default())
+        .expect("Invalid route")
+        .include_health_check(false)
+        .route_config(RouteConfig {
             strip_path_prefix: false,
-        },
-    )
-    .expect("Invalid route");
+        });
 
     let app = TestApp::new(vec![route]).await.unwrap();
 
@@ -40,17 +34,12 @@ async fn test_upstream_peer_not_found_route() {
 async fn test_upstream_peer_with_real_backends() {
     let backend_addresses = TestApp::create_backends(2).await.unwrap();
 
-    let route = Route::new(
-        "/health",
-        backend_addresses,
-        Adaptive::default(),
-        false,
-        DEFAULT_MAX_ALGORITHM_ITERATIONS,
-        RouteConfig {
+    let route = Route::new("/health", backend_addresses, Adaptive::default())
+        .expect("Invalid route")
+        .include_health_check(false)
+        .route_config(RouteConfig {
             strip_path_prefix: false,
-        },
-    )
-    .expect("Invalid route");
+        });
 
     let app = TestApp::new(vec![route]).await.unwrap();
 
@@ -69,17 +58,9 @@ async fn test_upstream_peer_with_real_backends() {
 async fn test_upstream_peer_path_stripping() {
     let backend_addresses = TestApp::create_backends(1).await.unwrap();
 
-    let route = Route::new(
-        "/api/*",
-        backend_addresses,
-        Adaptive::default(),
-        false,
-        DEFAULT_MAX_ALGORITHM_ITERATIONS,
-        RouteConfig {
-            strip_path_prefix: true,
-        },
-    )
-    .expect("Invalid route");
+    let route = Route::new("/api/*", backend_addresses, Adaptive::default())
+        .expect("Invalid route")
+        .include_health_check(false);
 
     let app = TestApp::new(vec![route]).await.unwrap();
 
@@ -102,29 +83,13 @@ async fn test_upstream_peer_multiple_routes() {
     let addr1 = backend_addresses[0].clone();
     let addr2 = backend_addresses[1].clone();
 
-    let route1 = Route::new(
-        "/work",
-        vec![addr1],
-        Adaptive::default(),
-        false,
-        DEFAULT_MAX_ALGORITHM_ITERATIONS,
-        RouteConfig {
-            strip_path_prefix: false,
-        },
-    )
-    .expect("Invalid route");
+    let route1 = Route::new("/work", vec![addr1], Adaptive::default())
+        .expect("Invalid route")
+        .include_health_check(false);
 
-    let route2 = Route::new(
-        "/api/*",
-        vec![addr2],
-        Adaptive::default(),
-        false,
-        DEFAULT_MAX_ALGORITHM_ITERATIONS,
-        RouteConfig {
-            strip_path_prefix: true,
-        },
-    )
-    .expect("Invalid route");
+    let route2 = Route::new("/api/*", vec![addr2], Adaptive::default())
+        .expect("Invalid route")
+        .include_health_check(false);
 
     let app = TestApp::new(vec![route1, route2]).await.unwrap();
 
@@ -150,17 +115,12 @@ async fn test_upstream_peer_multiple_routes() {
 async fn test_upstream_peer_load_balancing() {
     let backend_addresses = TestApp::create_backends(3).await.unwrap();
 
-    let route = Route::new(
-        "/work",
-        backend_addresses,
-        Adaptive::default(),
-        false,
-        DEFAULT_MAX_ALGORITHM_ITERATIONS,
-        RouteConfig {
+    let route = Route::new("/work", backend_addresses, Adaptive::default())
+        .expect("Invalid route")
+        .include_health_check(false)
+        .route_config(RouteConfig {
             strip_path_prefix: false,
-        },
-    )
-    .expect("Invalid route");
+        });
 
     let app = TestApp::new(vec![route]).await.unwrap();
 

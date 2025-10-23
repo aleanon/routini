@@ -4,7 +4,6 @@ use fake::{Fake, Faker};
 use routini::{
     load_balancing::strategy::Adaptive,
     server_builder::{Route, RouteConfig, proxy_server},
-    utils::constants::DEFAULT_MAX_ALGORITHM_ITERATIONS,
 };
 use tokio::net::TcpListener;
 
@@ -35,17 +34,11 @@ impl TestApp {
 
         let backend_addr_clone = backend_addresses.clone();
         std::thread::spawn(move || {
-            let route = Route::new(
-                "/health",
-                backend_addr_clone,
-                selection_strategy,
-                true,
-                DEFAULT_MAX_ALGORITHM_ITERATIONS,
-                RouteConfig {
+            let route = Route::new("/health", backend_addr_clone, selection_strategy)
+                .expect("Failed to construct route")
+                .route_config(RouteConfig {
                     strip_path_prefix: false,
-                },
-            )
-            .expect("Failed to construct route");
+                });
 
             proxy_server(listener)
                 .add_route(route)
