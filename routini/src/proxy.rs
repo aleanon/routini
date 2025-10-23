@@ -53,7 +53,13 @@ impl Proxy {
             .map(|m| {
                 let value = m.value;
                 let stripped_path = if value.route_config.strip_path_prefix {
-                    m.params.get("rest").map(|p| p.to_string())
+                    m.params.get("rest").map(|p| {
+                        if !p.starts_with('/') {
+                            format!("/{p}")
+                        } else {
+                            p.to_string()
+                        }
+                    })
                 } else {
                     None
                 };
@@ -89,10 +95,7 @@ impl ProxyHttp for Proxy {
                 retry: RetryType::Decided(true),
             })?;
 
-        if let Some(mut path) = new_path {
-            if !path.starts_with('/') {
-                path.insert(0, '/');
-            }
+        if let Some(path) = new_path {
             session.req_header_mut().set_raw_path(path.as_bytes())?;
         }
 
