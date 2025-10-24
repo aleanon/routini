@@ -9,7 +9,7 @@ use crate::{
     load_balancing::{LoadBalancer, health_check::TcpHealthCheck, strategy::Adaptive},
     proxy::{Proxy, RouteValue},
     set_strategy_endpoint::SetStrategyEndpoint,
-    utils::constants::DEFAULT_MAX_ALGORITHM_ITERATIONS,
+    utils::constants::{DEFAULT_MAX_ALGORITHM_ITERATIONS, WILDCARD_IDENTIFIER},
 };
 
 const PATH_REGEX_PATTERN: &str = r"^/[^*]*\*?$";
@@ -68,7 +68,7 @@ impl Route {
                 "Invalid path, it must start with '/', have at most one * and any eventual * must be at the end of the string"
             ));
         }
-        let path = path.as_ref().replacen("*", "{*rest}", 1);
+        let path = path.as_ref().replacen("*", WILDCARD_IDENTIFIER, 1);
 
         let backends = backends
             .into_iter()

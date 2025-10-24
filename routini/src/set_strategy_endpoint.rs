@@ -62,14 +62,14 @@ impl ServeHttp for SetStrategyEndpoint {
                 };
                 let Some(body) = body else {
                     error!("Empty body");
-                    return response(StatusCode::INTERNAL_SERVER_ERROR);
+                    return response(StatusCode::BAD_REQUEST);
                 };
 
                 match serde_json::from_slice::<NewStrategy>(&body) {
                     Ok(NewStrategy { path, strategy }) => match self.router.route(&path) {
                         Ok((route_value, _)) => {
                             route_value.lb.update_strategy(strategy.clone());
-                            info!("Strategy updated to {}", strategy);
+                            info!("Strategy updated to {} for {}", strategy, path);
                             response(StatusCode::OK)
                         }
                         Err(err) => {
