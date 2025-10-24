@@ -15,6 +15,7 @@ use crate::{
         strategy::{Adaptive, fewest_connections::ConnectionsTracer},
     },
     server_builder::RouteConfig,
+    utils::constants::PATH_REMAINDER_IDENTIFIER,
 };
 
 type MaxIterations = usize;
@@ -46,23 +47,27 @@ impl Proxy {
                     cause: Some(Box::new(e)),
                     context: Some(ImmutStr::Static("Failed to route path to backend")),
                     esource: ErrorSource::Internal,
-                    etype: ErrorType::HTTPStatus(StatusCode::BAD_REQUEST.as_u16()),
+                    etype: ErrorType::HTTPStatus(StatusCode::NOT_FOUND.as_u16()),
                     retry: RetryType::Decided(false),
                 })
             })
             .map(|m| {
                 let value = m.value;
-                let stripped_path = if value.route_config.strip_path_prefix {
-                    m.params.get("rest").map(|p| {
-                        if !p.starts_with('/') {
-                            format!("/{p}")
-                        } else {
-                            p.to_string()
-                        }
-                    })
-                } else {
-                    None
-                };
+                let stripped_path =
+                    value
+                        .route_config
+                        .strip_path_prefix
+                        .then_some(m)
+                        .and_then(|m| {
+                            m.params.get(PATH_REMAINDER_IDENTIFIER).map(|p| {
+                                if !p.starts_with('/') {
+                                    format!("/{p}")
+                                } else {
+                                    p.to_string()
+                                }
+                            })
+                        });
+
                 (value, stripped_path)
             })
     }
@@ -203,7 +208,7 @@ mod tests {
         if let Err(err) = result {
             assert_eq!(
                 err.etype,
-                ErrorType::HTTPStatus(StatusCode::BAD_REQUEST.as_u16())
+                ErrorType::HTTPStatus(StatusCode::NOT_FOUND.as_u16())
             );
         }
     }

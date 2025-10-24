@@ -26,7 +26,7 @@ async fn test_upstream_peer_not_found_route() {
         .await
         .expect("Failed to send request");
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 /// Tests that routing works with actual backend servers
