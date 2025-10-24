@@ -6,7 +6,7 @@ use routini::{
 
 use super::helpers::TestApp;
 
-/// Tests that a request to a non-existent route returns BAD_REQUEST
+/// Tests that a request to a non-existent route returns NOT_FOUND
 #[tokio::test]
 async fn test_upstream_peer_not_found_route() {
     let backends = vec!["127.0.0.1:8001".to_string()];
