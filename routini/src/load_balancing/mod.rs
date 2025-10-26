@@ -11,6 +11,7 @@ use std::io::Result as IoResult;
 use std::net::ToSocketAddrs;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
 
 mod background;
 pub mod discovery;
@@ -289,7 +290,8 @@ where
     backends: Backends,
     /// Controls what Strategy should be used when rebuilding the selector after an update.
     /// Usually a zero sized type that implements [Strategy]
-    strategy: ArcSwap<S>,
+    /// Uses Mutex to ensure there are no race conditions between strategy updates and selector rebuilds.
+    strategy: Mutex<S>,
     selector: ArcSwap<S::BackendSelector>,
     /// How frequent the health check logic (if set) should run.
     ///
@@ -348,7 +350,7 @@ where
         let selector = strategy.build_backend_selector(&backends.get_backend());
         LoadBalancer {
             backends,
-            strategy: ArcSwap::new(Arc::new(strategy)),
+            strategy: Mutex::new(strategy),
             selector: ArcSwap::new(Arc::new(selector)),
             health_check_frequency: None,
             update_frequency: None,
@@ -361,26 +363,29 @@ where
     /// This function will be called every `update_frequency` if this [LoadBalancer] instance
     /// is running as a background service.
     pub async fn update(&self) -> Result<()> {
+        let strategy = self.strategy.lock().await;
         self.backends
             .update(|backends| {
-                self.selector.store(Arc::new(
-                    self.strategy.load().build_backend_selector(&backends),
-                ));
+                self.selector
+                    .store(strategy.build_backend_selector(&backends).into());
             })
             .await
     }
 
-    pub fn update_strategy(&self, strategy: S) {
-        if &strategy == &**self.strategy.load() {
+    /// Stores the new strategy and rebuilds the selector according to the new strategy.
+    /// If this method is run on a Static load balancer, it will do nothing.
+    pub async fn update_strategy(&self, strategy: S) {
+        let mut current_strategy = self.strategy.lock().await;
+        if strategy == *current_strategy {
             return;
         }
 
-        self.strategy.store(Arc::new(strategy));
-        self.selector.store(Arc::new(
-            self.strategy
-                .load()
-                .build_backend_selector(&self.backends().get_backend()),
-        ));
+        *current_strategy = strategy;
+        self.selector.store(
+            current_strategy
+                .build_backend_selector(&self.backends().get_backend())
+                .into(),
+        );
     }
 
     /// Return the first healthy [Backend] according to the selection algorithm and the

@@ -13,9 +13,9 @@ use crate::load_balancing::{
 
 #[derive(Default, PartialEq, Deserialize, Clone)]
 pub enum Adaptive {
-    #[default]
     RoundRobin,
     Random,
+    #[default]
     FNVHash,
     Consistent,
     FewestConnections,
