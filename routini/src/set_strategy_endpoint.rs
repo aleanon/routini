@@ -68,7 +68,7 @@ impl ServeHttp for SetStrategyEndpoint {
                 match serde_json::from_slice::<NewStrategy>(&body) {
                     Ok(NewStrategy { path, strategy }) => match self.router.route(&path) {
                         Ok((route_value, _)) => {
-                            route_value.lb.update_strategy(strategy.clone());
+                            route_value.lb.update_strategy(strategy.clone()).await;
                             info!("Strategy updated to {} for {}", strategy, path);
                             response(StatusCode::OK)
                         }
@@ -87,6 +87,10 @@ impl ServeHttp for SetStrategyEndpoint {
 
 fn response(status: StatusCode) -> Response<Vec<u8>> {
     let mut response = Response::new(Vec::new());
+    *response.status_mut() = status;
+    response
+        .headers_mut()
+        .insert("Content-Length", "0".parse().unwrap());
     *response.status_mut() = status;
     response
 }

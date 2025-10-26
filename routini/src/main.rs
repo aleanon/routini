@@ -16,10 +16,12 @@ fn main() -> Result<()> {
         "127.0.0.1:4001".to_owned(),
         "127.0.0.1:4002".to_owned(),
     ];
-    let route = Route::new("/auth/*", backends, Adaptive::RoundRobin)?;
+    let route = Route::new("/auth/*", backends.clone(), Adaptive::RoundRobin)?;
+    let route_two = Route::new("/api/*", backends, Adaptive::RoundRobin)?;
 
     proxy_server(listener)
         .add_route(route)
+        .add_route(route_two)
         .set_strategy_endpoint(SET_STRATEGY_ENDPOINT_ADDRESS.to_string())
         .build()
         .run_forever();

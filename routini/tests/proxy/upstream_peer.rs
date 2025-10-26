@@ -12,7 +12,7 @@ async fn test_upstream_peer_not_found_route() {
     let backends = vec!["127.0.0.1:8001".to_string()];
     let route = Route::new("/api", backends, Adaptive::default())
         .expect("Invalid route")
-        .include_health_check(false)
+        .include_health_check(None)
         .route_config(RouteConfig {
             strip_path_prefix: false,
         });
@@ -36,7 +36,7 @@ async fn test_upstream_peer_with_real_backends() {
 
     let route = Route::new("/health", backend_addresses, Adaptive::default())
         .expect("Invalid route")
-        .include_health_check(false)
+        .include_health_check(None)
         .route_config(RouteConfig {
             strip_path_prefix: false,
         });
@@ -60,7 +60,7 @@ async fn test_upstream_peer_path_stripping() {
 
     let route = Route::new("/api/*", backend_addresses, Adaptive::default())
         .expect("Invalid route")
-        .include_health_check(false);
+        .include_health_check(None);
 
     let app = TestApp::new(vec![route]).await.unwrap();
 
@@ -85,11 +85,11 @@ async fn test_upstream_peer_multiple_routes() {
 
     let route1 = Route::new("/work", vec![addr1], Adaptive::default())
         .expect("Invalid route")
-        .include_health_check(false);
+        .include_health_check(None);
 
     let route2 = Route::new("/api/*", vec![addr2], Adaptive::default())
         .expect("Invalid route")
-        .include_health_check(false);
+        .include_health_check(None);
 
     let app = TestApp::new(vec![route1, route2]).await.unwrap();
 
@@ -117,7 +117,7 @@ async fn test_upstream_peer_load_balancing() {
 
     let route = Route::new("/work", backend_addresses, Adaptive::default())
         .expect("Invalid route")
-        .include_health_check(false)
+        .include_health_check(None)
         .route_config(RouteConfig {
             strip_path_prefix: false,
         });

@@ -1,4 +1,4 @@
-use std::{net::TcpListener, sync::LazyLock};
+use std::{net::TcpListener, sync::LazyLock, time::Duration};
 
 use color_eyre::eyre::{Result, eyre};
 use matchit::Router;
@@ -52,7 +52,7 @@ pub struct Route {
     pub path: String,
     pub backends: Vec<String>,
     pub lb_strategy: Adaptive,
-    pub include_health_check: bool,
+    pub health_check_frequency: Option<Duration>,
     pub max_iterations: usize,
     pub route_config: RouteConfig,
 }
@@ -83,7 +83,7 @@ impl Route {
             path,
             backends,
             lb_strategy,
-            include_health_check: true,
+            health_check_frequency: Some(Duration::from_secs(1)),
             max_iterations: DEFAULT_MAX_ALGORITHM_ITERATIONS,
             route_config: RouteConfig::default(),
         })
@@ -95,9 +95,10 @@ impl Route {
         self
     }
 
-    /// Default: true
-    pub fn include_health_check(mut self, include_health_check: bool) -> Self {
-        self.include_health_check = include_health_check;
+    /// Default: Some(Duration::from_secs(10))
+    /// set to None to not run health check background service
+    pub fn include_health_check(mut self, update_frequency: Option<Duration>) -> Self {
+        self.health_check_frequency = update_frequency;
         self
     }
 
@@ -139,9 +140,10 @@ impl ServerBuilder {
                 LoadBalancer::try_from_iter_with_strategy(route.backends, route.lb_strategy)
                     .expect("Failed to parse backend addresses");
 
-            if route.include_health_check {
+            if let Some(duration) = route.health_check_frequency {
                 let hc = TcpHealthCheck::new();
                 lb.set_health_check(hc);
+                lb.health_check_frequency = Some(duration);
             }
 
             let service_name = format!("lb updater-{}", &route.path);
@@ -271,13 +273,13 @@ mod tests {
         let route = Route::new("/api/*", vec!["127.0.0.1:8080"], Adaptive::default())
             .unwrap()
             .max_iterations(20)
-            .include_health_check(false)
+            .include_health_check(None)
             .route_config(RouteConfig {
                 strip_path_prefix: false,
             });
 
         assert_eq!(route.max_iterations, 20);
-        assert_eq!(route.include_health_check, false);
+        assert_eq!(route.health_check_frequency, None);
         assert_eq!(route.route_config.strip_path_prefix, false);
     }
 
@@ -286,7 +288,7 @@ mod tests {
         let route = Route::new("/api", vec!["127.0.0.1:8080"], Adaptive::default()).unwrap();
 
         assert_eq!(route.max_iterations, DEFAULT_MAX_ALGORITHM_ITERATIONS);
-        assert_eq!(route.include_health_check, true);
+        assert_eq!(route.health_check_frequency, Some(Duration::from_secs(1)));
         assert_eq!(route.route_config.strip_path_prefix, true);
     }
 
