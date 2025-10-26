@@ -290,7 +290,7 @@ where
     backends: Backends,
     /// Controls what Strategy should be used when rebuilding the selector after an update.
     /// Usually a zero sized type that implements [Strategy]
-    /// Uses Mutex to ensure there are no race conditions between strategy updates and selector rebuilds.
+    /// Uses Mutex to ensure there are no race conditions between the `update_strategy` and `update` methods.
     strategy: Mutex<S>,
     selector: ArcSwap<S::BackendSelector>,
     /// How frequent the health check logic (if set) should run.
@@ -373,7 +373,7 @@ where
     }
 
     /// Stores the new strategy and rebuilds the selector according to the new strategy.
-    /// If this method is run on a Static load balancer, it will do nothing.
+    /// If this method is run on a load balancer with a static strategy, it will do nothing.
     pub async fn update_strategy(&self, strategy: S) {
         let mut current_strategy = self.strategy.lock().await;
         if strategy == *current_strategy {
