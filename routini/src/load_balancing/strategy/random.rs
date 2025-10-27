@@ -10,7 +10,7 @@ use crate::load_balancing::{
 
 pub type RandomSelector = WeightedSelector<RandomAlgo>;
 
-#[derive(PartialEq, Default, Deserialize)]
+#[derive(PartialEq, Default, Deserialize, Clone)]
 pub struct Random;
 
 impl Strategy for Random {

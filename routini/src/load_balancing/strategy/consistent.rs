@@ -22,7 +22,7 @@ use pingora_ketama::{Bucket, Continuum};
 use serde::Deserialize;
 use std::collections::HashMap;
 
-#[derive(Default, PartialEq, Deserialize)]
+#[derive(Default, PartialEq, Deserialize, Clone)]
 pub struct Consistent;
 
 impl Strategy for Consistent {

@@ -9,7 +9,7 @@ use crate::load_balancing::{
 
 pub type FNVHashSelector = WeightedSelector<fnv::FnvHasher>;
 
-#[derive(PartialEq, Deserialize)]
+#[derive(PartialEq, Deserialize, Clone)]
 pub struct FNVHash;
 
 impl Strategy for FNVHash {

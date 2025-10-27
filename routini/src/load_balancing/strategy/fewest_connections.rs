@@ -1,50 +1,54 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     sync::{
-        Arc, LazyLock,
+        Arc,
         atomic::{AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 
-use arc_swap::ArcSwap;
-use pingora::{protocols::l4::socket::SocketAddr, upstreams::peer::Tracing};
-use serde::Deserialize;
-use smallvec::SmallVec;
-
 use crate::load_balancing::{
-    Backend,
+    Backend, BackendMetrics, Metrics,
     strategy::{BackendIter, BackendSelection, Strategy},
 };
 
-type BackendIndex = usize;
-type ConnectionCount = Arc<AtomicUsize>;
+pub type ActiveConnections = AtomicUsize;
 
-pub static CONNECTIONS: LazyLock<ArcSwap<BTreeMap<SocketAddr, (BackendIndex, ConnectionCount)>>> =
-    LazyLock::new(|| ArcSwap::new(Arc::new(BTreeMap::new())));
-
-#[derive(Default, PartialEq, Eq, Deserialize)]
+#[derive(Default, Clone, PartialEq)]
 pub struct FewestConnections;
 
 impl Strategy for FewestConnections {
     type BackendSelector = FewestConnectionsSelector;
 
-    fn build_backend_selector(&self, backends: &BTreeSet<Backend>) -> Self::BackendSelector {
-        let backends = Vec::from_iter(backends.iter().cloned()).into_boxed_slice();
-        let connections = {
-            let existing_connections = CONNECTIONS.load();
-            backends
-                .iter()
-                .enumerate()
-                .map(|(i, b)| match existing_connections.get(&b.addr) {
-                    Some((_, conn_count)) => (b.addr.clone(), (i, conn_count.clone())),
-                    None => (b.addr.clone(), (i, Arc::new(AtomicUsize::new(0)))),
-                })
-                .collect()
-        };
+    fn metrics(&self) -> BackendMetrics {
+        Some(Arc::new(ActiveConnections::new(0)))
+    }
 
-        CONNECTIONS.store(Arc::new(connections));
+    fn build_backend_selector(&self, backends: &BTreeSet<Backend>) -> Self::BackendSelector {
+        let mut backends_with_metrics = Vec::with_capacity(backends.len());
+
+        for backend in backends.iter() {
+            let Some(nr_of_connections) = backend.metrics.active_connections() else {
+                log::error!("Missing metrics implementation for FewestConnections");
+                unreachable!("Implementation missing");
+            };
+            backends_with_metrics.push((backend, nr_of_connections));
+        }
+
+        backends_with_metrics.sort_unstable_by_key(|(_, nr_of_connections)| *nr_of_connections);
+
+        let backends = backends_with_metrics
+            .into_iter()
+            .map(|(b, _)| b.clone())
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
 
         FewestConnectionsSelector { backends }
+    }
+
+    fn rebuild_frequency(&self) -> Option<Duration> {
+        // TODO: Change this to a configurable value held in self
+        Some(Duration::from_millis(200))
     }
 }
 
@@ -62,69 +66,37 @@ impl BackendSelection for FewestConnectionsSelector {
 
 pub struct FewestConnectionsIter {
     least_connections: Arc<FewestConnectionsSelector>,
-    /// The load balancer should use the first returned backend in the vast majority of cases,
-    /// therefor we use a small vec to track previously returned backends. This lets us skip allocating
-    /// most of the time when the iterator is used.
-    yielded: SmallVec<[usize; 2]>,
+    index: usize,
 }
 
 impl FewestConnectionsIter {
     fn new(least_connections: Arc<FewestConnectionsSelector>, _key: &[u8]) -> Self {
         Self {
             least_connections,
-            yielded: SmallVec::new(),
+            index: 0,
         }
     }
 }
 
 impl BackendIter for FewestConnectionsIter {
     fn next(&mut self) -> Option<&Backend> {
-        let conns = CONNECTIONS.load();
-        let mut min_count = usize::MAX;
-        let mut min_index = None;
-
-        for (i, count) in conns.values() {
-            if self.yielded.contains(i) {
-                continue;
-            }
-            let c = count.load(Ordering::Relaxed);
-            if c < min_count {
-                min_count = c;
-                min_index = Some(*i);
-            }
-        }
-
-        if let Some(i) = min_index {
-            self.yielded.push(i);
-            self.least_connections.backends.get(i)
-        } else {
-            None
-        }
+        let backend = self.least_connections.backends.get(self.index)?;
+        self.index += 1;
+        Some(backend)
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct ConnectionsTracer(pub SocketAddr);
-
-impl Tracing for ConnectionsTracer {
-    fn on_connected(&self) {
-        CONNECTIONS
-            .load()
-            .get(&self.0)
-            .and_then(|(_, count)| Some(count.fetch_add(1, Ordering::Relaxed)));
-        log::debug!("incremented connection {}", &self.0)
+impl Metrics for ActiveConnections {
+    fn increment_active_connections(&self) {
+        self.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn on_disconnected(&self) {
-        CONNECTIONS
-            .load()
-            .get(&self.0)
-            .and_then(|(_, count)| Some(count.fetch_sub(1, Ordering::Relaxed)));
-        log::debug!("decremented connection {}", &self.0);
+    fn decrement_active_connections(&self) {
+        self.fetch_sub(1, Ordering::Relaxed);
     }
 
-    fn boxed_clone(&self) -> Box<dyn Tracing> {
-        Box::new(self.clone()) as Box<dyn Tracing>
+    fn active_connections(&self) -> Option<usize> {
+        Some(self.load(Ordering::Relaxed))
     }
 }
 
@@ -132,67 +104,154 @@ impl Tracing for ConnectionsTracer {
 mod tests {
     use super::*;
 
-    fn get_connection(least_connections: &Arc<FewestConnectionsSelector>) -> Option<SocketAddr> {
-        let mut iter = least_connections.iter(&[]);
-        let Some(backend) = iter.next().and_then(|b| Some(b.addr.clone())) else {
-            return None;
-        };
+    fn create_backend_with_connections(addr: &str) -> Backend {
+        let mut backend = Backend::new(addr).unwrap();
+        backend.metrics = Some(Arc::new(ActiveConnections::new(0)));
+        backend
+    }
 
-        CONNECTIONS
-            .load()
-            .get(&backend)
-            .unwrap()
-            .1
-            .fetch_add(1, Ordering::Relaxed);
-        Some(backend)
+    fn set_backend_connections(backend: &mut Backend, count: usize) {
+        backend.metrics = Some(Arc::new(ActiveConnections::new(count)));
+    }
+
+    fn increment_backend_connection(backend: &Backend) {
+        if let Some(metrics) = &backend.metrics {
+            metrics.increment_active_connections();
+        }
+    }
+
+    fn decrement_backend_connection(backend: &Backend) {
+        if let Some(metrics) = &backend.metrics {
+            metrics.decrement_active_connections();
+        }
+    }
+
+    fn get_backend_connections(backend: &Backend) -> Option<usize> {
+        backend.metrics.active_connections()
     }
 
     #[test]
-    fn test_next() {
-        let backend1_addr = SocketAddr::Inet("127.0.0.1:8080".parse().unwrap());
-        let backend2_addr = SocketAddr::Inet("127.0.0.1:8081".parse().unwrap());
-        let backend3_addr = SocketAddr::Inet("127.0.0.1:8082".parse().unwrap());
+    fn test_selection_order_by_connection_count() {
+        // Create backends with atomic counters in their extensions
+        let mut backend1 = create_backend_with_connections("127.0.0.1:8080");
+        let mut backend2 = create_backend_with_connections("127.0.0.1:8081");
+        let mut backend3 = create_backend_with_connections("127.0.0.1:8082");
 
-        let backends = [&backend1_addr, &backend2_addr, &backend3_addr]
-            .iter()
-            .map(|a| Backend::new(&a.to_string()).unwrap())
-            .collect();
+        // Set initial connection counts: backend1=0, backend2=5, backend3=10
+        set_backend_connections(&mut backend1, 0);
+        set_backend_connections(&mut backend2, 5);
+        set_backend_connections(&mut backend3, 10);
 
-        let least_connections = Arc::new(FewestConnections.build_backend_selector(&backends));
-        backends.iter().enumerate().for_each(|(i, b)| {
-            let map = CONNECTIONS.load();
-            let connections = map.get(&b.addr).unwrap();
-            connections.1.store(i, Ordering::Relaxed);
-        });
+        let mut backends = BTreeSet::new();
+        backends.insert(backend1.clone());
+        backends.insert(backend2.clone());
+        backends.insert(backend3.clone());
 
-        assert_eq!(
-            get_connection(&least_connections).expect("Failed to connect to backend"),
-            backend1_addr.clone()
-        );
+        let strategy = FewestConnections::default();
+        let selector = Arc::new(strategy.build_backend_selector(&backends));
 
-        assert_eq!(
-            get_connection(&least_connections).expect("Failed to connect to backend"),
-            backend1_addr.clone()
-        );
+        // First backend should be backend1 (0 connections)
+        let mut iter = selector.iter(&[]);
+        let first = iter.next().expect("Should return first backend");
+        assert_eq!(first.addr, backend1.addr);
 
-        assert_eq!(
-            get_connection(&least_connections).expect("Failed to connect to backend"),
-            backend2_addr.clone()
-        );
+        // Second should be backend2 (5 connections)
+        let second = iter.next().expect("Should return second backend");
+        assert_eq!(second.addr, backend2.addr);
 
-        assert_eq!(
-            get_connection(&least_connections).expect("Failed to connect to backend"),
-            backend1_addr.clone()
-        );
+        // Third should be backend3 (10 connections)
+        let third = iter.next().expect("Should return third backend");
+        assert_eq!(third.addr, backend3.addr);
 
-        assert_eq!(
-            get_connection(&least_connections).expect("Failed to connect to backend"),
-            backend2_addr.clone()
-        );
+        // No more backends
+        assert!(iter.next().is_none());
+    }
 
-        assert_eq!(
-            get_connection(&least_connections).expect("Failed to connect to backend"),
-            backend3_addr.clone()
-        );
+    #[test]
+    fn test_dynamic_connection_tracking() {
+        // Create backends
+        let backend1 = create_backend_with_connections("127.0.0.1:8080");
+        let backend2 = create_backend_with_connections("127.0.0.1:8081");
+
+        let mut backends = BTreeSet::new();
+        backends.insert(backend1.clone());
+        backends.insert(backend2.clone());
+
+        let strategy = FewestConnections::default();
+
+        // Initial selection should pick backend1 (same count, but comes first in BTreeSet)
+        let selector = Arc::new(strategy.build_backend_selector(&backends));
+        let mut iter = selector.iter(&[]);
+        let selected = iter.next().unwrap();
+        assert_eq!(selected.addr, backend1.addr);
+
+        // Simulate connection to backend1
+        increment_backend_connection(&backend1);
+        assert_eq!(get_backend_connections(&backend1), Some(1));
+        assert_eq!(get_backend_connections(&backend2), Some(0));
+
+        // Rebuild selector - now backend2 should be first (0 connections vs 1)
+        let selector = Arc::new(strategy.build_backend_selector(&backends));
+        let mut iter = selector.iter(&[]);
+        let selected = iter.next().unwrap();
+        assert_eq!(selected.addr, backend2.addr);
+
+        // Simulate connection to backend2
+        increment_backend_connection(&backend2);
+
+        // Both now have 1 connection
+        assert_eq!(get_backend_connections(&backend1), Some(1));
+        assert_eq!(get_backend_connections(&backend2), Some(1));
+    }
+
+    #[test]
+    fn test_connection_decrement() {
+        let backend = create_backend_with_connections("127.0.0.1:8080");
+
+        // Increment twice
+        increment_backend_connection(&backend);
+        increment_backend_connection(&backend);
+        assert_eq!(get_backend_connections(&backend), Some(2));
+
+        // Decrement once
+        decrement_backend_connection(&backend);
+        assert_eq!(get_backend_connections(&backend), Some(1));
+
+        // Decrement again
+        decrement_backend_connection(&backend);
+        assert_eq!(get_backend_connections(&backend), Some(0));
+    }
+
+    #[test]
+    fn test_iter_exhaustion() {
+        let backend1 = create_backend_with_connections("127.0.0.1:8080");
+        let backend2 = create_backend_with_connections("127.0.0.1:8081");
+
+        let mut backends = BTreeSet::new();
+        backends.insert(backend1.clone());
+        backends.insert(backend2.clone());
+
+        let strategy = FewestConnections::default();
+        let selector = Arc::new(strategy.build_backend_selector(&backends));
+
+        let mut iter = selector.iter(&[]);
+
+        // Should return both backends
+        assert!(iter.next().is_some());
+        assert!(iter.next().is_some());
+
+        // Then None
+        assert!(iter.next().is_none());
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn test_empty_backends() {
+        let backends = BTreeSet::new();
+        let strategy = FewestConnections::default();
+        let selector = Arc::new(strategy.build_backend_selector(&backends));
+
+        let mut iter = selector.iter(&[]);
+        assert!(iter.next().is_none());
     }
 }

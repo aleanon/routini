@@ -12,7 +12,7 @@ use crate::load_balancing::{
 
 pub type RoundRobinSelector = WeightedSelector<RoundRobinAlgo>;
 
-#[derive(PartialEq, Default, Deserialize)]
+#[derive(PartialEq, Default, Deserialize, Clone)]
 pub struct RoundRobin;
 
 impl Strategy for RoundRobin {

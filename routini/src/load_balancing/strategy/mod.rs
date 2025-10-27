@@ -16,11 +16,14 @@
 
 pub mod adaptive;
 pub mod consistent;
+pub mod fastest_server;
 pub mod fewest_connections;
 pub mod fnv_hash;
 pub mod random;
 pub mod round_robin;
 pub mod utils;
+
+use crate::load_balancing::BackendMetrics;
 
 pub use {
     adaptive::Adaptive, consistent::Consistent, fewest_connections::FewestConnections,
@@ -42,6 +45,11 @@ pub trait Strategy: Send + Sync {
     type BackendSelector: BackendSelection;
 
     fn build_backend_selector(&self, backends: &BTreeSet<Backend>) -> Self::BackendSelector;
+
+    /// Define metrics that the strategy needs, these will be stored in the Backend struct.
+    fn metrics(&self) -> BackendMetrics {
+        None
+    }
 
     /// Determines if the BackendSelector should be periodically rebuilt.
     fn rebuild_frequency(&self) -> Option<Duration> {
@@ -94,5 +102,3 @@ where
         hasher.finish()
     }
 }
-
-// TODO: least conn
