@@ -17,17 +17,17 @@ impl BackgroundService for AdaptiveLoadBalancer {
         let mut next_update = now;
         let mut next_health_check = now;
         let mut next_strategy_eval = now;
-        let mut selector_rebuild = now;
+        let mut selector_rebuild = now + self.lb.rebuild_frequency().await.unwrap_or(NEVER);
 
         loop {
             if *shutdown.borrow() {
-                return;
+                break;
             }
 
             if next_update <= now {
                 if let Err(err) = self.lb.update().await {
                     error!("Failed to update load balancer: {}", err);
-                };
+                }
                 next_update = now + self.lb.update_frequency.unwrap_or(NEVER);
             }
 
@@ -41,14 +41,17 @@ impl BackgroundService for AdaptiveLoadBalancer {
 
             if next_strategy_eval <= now {
                 let current_strategy = self.lb.current_strategy().await;
+                let backends = self.lb.backends().get_backend();
                 let strategy = self
                     .decision_engine
-                    .evaluate_strategy(&current_strategy)
+                    .evaluate_strategy(&current_strategy, &backends)
                     .await;
 
-                self.lb.update_strategy(strategy).await;
+                let was_updated = self.lb.update_strategy(strategy).await;
                 next_strategy_eval = now + self.decision_engine.evaluate_strategy_frequency;
-                selector_rebuild = now + self.lb.rebuild_frequency().await.unwrap_or(NEVER);
+                if was_updated {
+                    selector_rebuild = now + self.lb.rebuild_frequency().await.unwrap_or(NEVER);
+                }
             }
 
             if selector_rebuild <= now {
@@ -56,11 +59,15 @@ impl BackgroundService for AdaptiveLoadBalancer {
                 selector_rebuild = now + self.lb.rebuild_frequency().await.unwrap_or(NEVER);
             }
 
-            let Some(to_wake) = [next_update, next_health_check, next_strategy_eval]
-                .iter()
-                .min()
-                .cloned()
-            else {
+            let Some(to_wake) = [
+                next_update,
+                next_health_check,
+                next_strategy_eval,
+                selector_rebuild,
+            ]
+            .iter()
+            .min()
+            .cloned() else {
                 unreachable!("Array contained no value")
             };
 
