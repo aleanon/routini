@@ -6,6 +6,7 @@ use pingora::protocols::l4::socket::SocketAddr;
 use pingora::{ErrorType, OrErr, Result};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeSet, HashMap};
+use std::fmt::Display;
 use std::hash::{Hash, Hasher};
 use std::io::Result as IoResult;
 use std::net::ToSocketAddrs;
@@ -292,6 +293,7 @@ where
     /// Usually a zero sized type that implements [Strategy]
     /// Uses Mutex to ensure there are no race conditions between the `update_strategy` and `update` methods.
     strategy: Mutex<S>,
+    selector_rebuild_frequency: Mutex<Option<Duration>>,
     selector: ArcSwap<S::BackendSelector>,
     /// How frequent the health check logic (if set) should run.
     ///
@@ -348,9 +350,11 @@ where
 
     pub fn from_backends_with_strategy(backends: Backends, strategy: S) -> Self {
         let selector = strategy.build_backend_selector(&backends.get_backend());
+        let selector_rebuild_frequency = strategy.rebuild_frequency();
         LoadBalancer {
             backends,
             strategy: Mutex::new(strategy),
+            selector_rebuild_frequency: Mutex::new(selector_rebuild_frequency),
             selector: ArcSwap::new(Arc::new(selector)),
             health_check_frequency: None,
             update_frequency: None,
@@ -372,14 +376,40 @@ where
             .await
     }
 
+    pub async fn rebuild_frequency(&self) -> Option<Duration> {
+        self.selector_rebuild_frequency.lock().await.clone()
+    }
+
+    pub async fn current_strategy(&self) -> S
+    where
+        S: Clone,
+    {
+        self.strategy.lock().await.clone()
+    }
+
+    pub async fn rebuild_selector(&self) {
+        let strategy = self.strategy.lock().await;
+        self.selector.store(
+            strategy
+                .build_backend_selector(&self.backends().get_backend())
+                .into(),
+        );
+    }
+
     /// Stores the new strategy and rebuilds the selector according to the new strategy.
     /// If this method is run on a load balancer with a static strategy, it will do nothing.
-    pub async fn update_strategy(&self, strategy: S) {
+    pub async fn update_strategy(&self, strategy: S)
+    where
+        S: PartialEq + Display,
+    {
         let mut current_strategy = self.strategy.lock().await;
         if strategy == *current_strategy {
             return;
         }
 
+        log::info!("Updating strategy: {}", strategy);
+        let mut rebuild_frequency = self.selector_rebuild_frequency.lock().await;
+        *rebuild_frequency = strategy.rebuild_frequency();
         *current_strategy = strategy;
         self.selector.store(
             current_strategy

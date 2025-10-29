@@ -6,7 +6,8 @@ use pingora::{prelude::background_service, proxy::http_proxy_service, server::Se
 use regex::Regex;
 
 use crate::{
-    load_balancing::{LoadBalancer, health_check::TcpHealthCheck, strategy::Adaptive},
+    adaptive_loadbalancer::{AdaptiveLoadBalancer, options::AdaptiveLbOpt},
+    load_balancing::strategy::Adaptive,
     proxy::{Proxy, RouteValue},
     set_strategy_endpoint::SetStrategyEndpoint,
     utils::constants::{DEFAULT_MAX_ALGORITHM_ITERATIONS, WILDCARD_IDENTIFIER},
@@ -136,17 +137,17 @@ impl ServerBuilder {
 
         let mut routes = Router::new();
         for route in self.routes {
-            let mut lb =
-                LoadBalancer::try_from_iter_with_strategy(route.backends, route.lb_strategy)
-                    .expect("Failed to parse backend addresses");
+            let lb_options = AdaptiveLbOpt {
+                max_iterations: route.max_iterations,
+                starting_strategy: route.lb_strategy,
+                health_check_interval: route.health_check_frequency,
+                ..Default::default()
+            };
 
-            if let Some(duration) = route.health_check_frequency {
-                let hc = TcpHealthCheck::new();
-                lb.set_health_check(hc);
-                lb.health_check_frequency = Some(duration);
-            }
+            let lb = AdaptiveLoadBalancer::try_from_iter(route.backends, Some(lb_options))
+                .expect("Failed to parse backend addresses");
 
-            let service_name = format!("lb updater-{}", &route.path);
+            let service_name = format!("adaptive-lb-{}", &route.path);
             let background_service = background_service(&service_name, lb);
             let task = background_service.task();
             server.add_service(background_service);
@@ -155,7 +156,6 @@ impl ServerBuilder {
 
             let route_value = RouteValue {
                 lb: task,
-                max_iterations: route.max_iterations,
                 route_config: route.route_config,
             };
 

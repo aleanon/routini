@@ -1,28 +1,24 @@
 use http::StatusCode;
 use matchit::Router;
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use pingora::{
     Error, ErrorSource, ErrorType, ImmutStr, Result, RetryType,
+    http::{RequestHeader, ResponseHeader},
     prelude::HttpPeer,
+    protocols::{Digest, l4::socket::SocketAddr},
     proxy::{ProxyHttp, Session},
     upstreams::peer::Tracer,
 };
 
 use crate::{
-    load_balancing::{
-        LoadBalancer,
-        strategy::{Adaptive, fewest_connections::ConnectionsTracer},
-    },
-    server_builder::RouteConfig,
+    adaptive_loadbalancer::AdaptiveLoadBalancer,
+    load_balancing::strategy::fewest_connections::ConnectionsTracer, server_builder::RouteConfig,
     utils::constants::PATH_REMAINDER_IDENTIFIER,
 };
 
-type MaxIterations = usize;
-
 pub struct RouteValue {
-    pub lb: Arc<LoadBalancer<Adaptive>>,
-    pub max_iterations: MaxIterations,
+    pub lb: Arc<AdaptiveLoadBalancer>,
     pub route_config: RouteConfig,
 }
 
@@ -73,57 +69,145 @@ impl Proxy {
     }
 }
 
+pub struct ConnectionCTX {
+    upstream_start: Option<Instant>,
+    lb: Option<Arc<AdaptiveLoadBalancer>>,
+    backend_addr: Option<SocketAddr>,
+}
+
 #[async_trait::async_trait]
 impl ProxyHttp for Proxy {
-    type CTX = Option<String>;
+    type CTX = ConnectionCTX;
 
     fn new_ctx(&self) -> Self::CTX {
-        None
+        ConnectionCTX {
+            upstream_start: None,
+            lb: None,
+            backend_addr: None,
+        }
     }
 
     async fn upstream_peer(
         &self,
         session: &mut Session,
-        _ctx: &mut Self::CTX,
+        ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
         let path = session.req_header().uri.path();
         let (route_value, new_path) = self.route(path)?;
 
-        let backend = route_value
-            .lb
-            .select(&[], route_value.max_iterations)
-            .ok_or(Error {
-                context: Some(ImmutStr::Static("No healthy backends available")),
-                cause: None,
-                etype: ErrorType::InternalError,
-                esource: ErrorSource::Internal,
-                retry: RetryType::Decided(true),
-            })?;
+        let backend = route_value.lb.select(&[]).ok_or(Error {
+            context: Some(ImmutStr::Static("No healthy backends available")),
+            cause: None,
+            etype: ErrorType::InternalError,
+            esource: ErrorSource::Internal,
+            retry: RetryType::Decided(true),
+        })?;
 
         if let Some(path) = new_path {
             session.req_header_mut().set_raw_path(path.as_bytes())?;
         }
+
+        ctx.backend_addr = Some(backend.addr.clone());
+        ctx.lb = Some(route_value.lb.clone());
 
         let tracer = Tracer(Box::new(ConnectionsTracer(backend.addr.clone())));
         let mut peer = Box::new(HttpPeer::new(backend, false, String::new()));
         peer.options.tracer = Some(tracer);
         Ok(peer)
     }
+
+    async fn upstream_request_filter(
+        &self,
+        _session: &mut Session,
+        _upstream_request: &mut RequestHeader,
+        ctx: &mut Self::CTX,
+    ) -> Result<()> {
+        ctx.upstream_start = Some(Instant::now());
+        Ok(())
+    }
+
+    async fn upstream_response_filter(
+        &self,
+        _session: &mut Session,
+        _upstream_response: &mut ResponseHeader,
+        ctx: &mut Self::CTX,
+    ) -> Result<()> {
+        if let Some(start) = ctx.upstream_start {
+            let latency = start.elapsed();
+            if let Some(lb) = ctx.lb.clone() {
+                if let Some(addr) = &ctx.backend_addr {
+                    lb.record_latency(addr.clone(), latency).await;
+                }
+            }
+        }
+        Ok(())
+    }
+    /// This filter is called when the request just established or reused a connection to the upstream
+    ///
+    /// This filter allows user to log timing and connection related info.
+    async fn connected_to_upstream(
+        &self,
+        _session: &mut Session,
+        _reused: bool,
+        _peer: &HttpPeer,
+        #[cfg(unix)] _fd: std::os::unix::io::RawFd,
+        #[cfg(windows)] _sock: std::os::windows::io::RawSocket,
+        _digest: Option<&Digest>,
+        ctx: &mut Self::CTX,
+    ) -> Result<()>
+    where
+        Self::CTX: Send + Sync,
+    {
+        if let Some(lb) = &ctx.lb {
+            if let Some(addr) = &ctx.backend_addr {
+                lb.increment_connections(addr.clone()).await;
+            }
+        }
+        Ok(())
+    }
+
+    /// This filter is called when an HTTP stream/session to the upstream has ended
+    ///
+    /// This is called right before the connection is released back to the connection pool
+    /// (for both HTTP/1 and HTTP/2). For HTTP/2, this is called once per stream, not per
+    /// underlying connection.
+    ///
+    /// This allows tracking of concurrent request/stream counts per backend, latency
+    /// measurements, or other per-request metrics.
+    ///
+    /// # Arguments
+    /// * `session` - The downstream session
+    /// * `peer` - The upstream peer that was connected to
+    /// * `reused` - Whether the connection/stream was reused from the pool
+    /// * `ctx` - The request context
+    async fn upstream_stream_ended(
+        &self,
+        _session: &mut Session,
+        _peer: &HttpPeer,
+        _reused: bool,
+        ctx: &mut Self::CTX,
+    ) where
+        Self::CTX: Send + Sync,
+    {
+        if let Some(lb) = &ctx.lb {
+            if let Some(addr) = &ctx.backend_addr {
+                lb.decrement_connections(addr.clone()).await;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::load_balancing::strategy::Adaptive;
 
     fn create_test_route_value(strip_path: bool) -> RouteValue {
         let backends = vec!["127.0.0.1:8080".to_string()];
-        let lb = LoadBalancer::try_from_iter_with_strategy(backends, Adaptive::default())
+        let lb = AdaptiveLoadBalancer::try_from_iter(backends, None)
             .expect("Failed to create load balancer");
 
         RouteValue {
             lb: Arc::new(lb),
-            max_iterations: 10,
             route_config: RouteConfig {
                 strip_path_prefix: strip_path,
             },
@@ -141,8 +225,7 @@ mod tests {
         let result = proxy.route("/api");
 
         assert!(result.is_ok());
-        let (route_value, stripped_path) = result.unwrap();
-        assert_eq!(route_value.max_iterations, 10);
+        let (_, stripped_path) = result.unwrap();
         assert_eq!(stripped_path, None);
     }
 
@@ -157,8 +240,7 @@ mod tests {
         let result = proxy.route("/api/users/123");
 
         assert!(result.is_ok());
-        let (route_value, stripped_path) = result.unwrap();
-        assert_eq!(route_value.max_iterations, 10);
+        let (_, stripped_path) = result.unwrap();
         assert_eq!(stripped_path, None);
     }
 
@@ -240,8 +322,7 @@ mod tests {
     #[test]
     fn test_route_exact_vs_wildcard_priority() {
         let mut router = Router::new();
-        let mut exact_route = create_test_route_value(false);
-        exact_route.max_iterations = 5;
+        let exact_route = create_test_route_value(false);
 
         router
             .insert("/api/health", exact_route)
@@ -254,13 +335,9 @@ mod tests {
 
         let result = proxy.route("/api/health");
         assert!(result.is_ok());
-        let (route_value, _) = result.unwrap();
-        assert_eq!(route_value.max_iterations, 5);
 
         let result = proxy.route("/api/users");
         assert!(result.is_ok());
-        let (route_value, _) = result.unwrap();
-        assert_eq!(route_value.max_iterations, 10);
     }
 
     #[test]

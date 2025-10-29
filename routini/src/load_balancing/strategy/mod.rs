@@ -35,12 +35,18 @@ use super::Backend;
 use std::collections::BTreeSet;
 use std::hash::Hasher;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// A builder for a backend selector
-pub trait Strategy: PartialEq + Send + Sync {
+pub trait Strategy: Send + Sync {
     type BackendSelector: BackendSelection;
 
     fn build_backend_selector(&self, backends: &BTreeSet<Backend>) -> Self::BackendSelector;
+
+    /// Determines if the BackendSelector should be periodically rebuilt.
+    fn rebuild_frequency(&self) -> Option<Duration> {
+        None
+    }
 }
 
 /// [BackendSelection] is the interface to implement backend selection mechanisms.

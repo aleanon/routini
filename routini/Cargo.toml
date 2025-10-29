@@ -12,13 +12,13 @@ name = "routini"
 path = "src/main.rs"
 
 [dependencies]
-async-trait = "0.1.89"
-pingora = { version = "0.6.0", features = [
+pingora = { git = "https://github.com/aleanon/pingora.git", branch = "stream-end-hook", features = [
     "lb",
     "pingora-proxy",
     "pingora-load-balancing",
     "pingora-cache",
 ] }
+async-trait = "0.1.89"
 pingora-runtime = "0.6.0"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = [
@@ -42,6 +42,7 @@ derive_more = { version = "2.0.1", features = ["from", "into"] }
 matchit = "0.8.4"
 regex = "1.12.2"
 color-eyre = "0.6.5"
+atomic_float = "1.1.0"
 
 
 [dev-dependencies]

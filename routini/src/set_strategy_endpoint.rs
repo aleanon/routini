@@ -81,6 +81,7 @@ impl ServeHttp for SetStrategyEndpoint {
                 }
             }
             ServerSession::H2(_) => response(StatusCode::BAD_REQUEST),
+            ServerSession::Subrequest(_) => response(StatusCode::BAD_REQUEST),
         }
     }
 }
