@@ -378,7 +378,7 @@ mod test {
         sync::atomic::{AtomicU16, Ordering},
     };
 
-    use crate::load_balancing::{Backends, discovery};
+    use crate::load_balancing::{Backends, discovery, strategy::RoundRobin};
 
     use super::*;
     use async_trait::async_trait;
@@ -392,6 +392,7 @@ mod test {
             addr: SocketAddr::Inet("1.1.1.1:80".parse().unwrap()),
             weight: 1,
             ext: Extensions::new(),
+            metrics: None,
         };
 
         assert!(tcp_check.check(&backend).await.is_ok());
@@ -400,6 +401,7 @@ mod test {
             addr: SocketAddr::Inet("1.1.1.1:79".parse().unwrap()),
             weight: 1,
             ext: Extensions::new(),
+            metrics: None,
         };
 
         assert!(tcp_check.check(&backend).await.is_err());
@@ -450,6 +452,7 @@ mod test {
             addr: SocketAddr::Inet("1.1.1.1:80".parse().unwrap()),
             weight: 1,
             ext: Extensions::new(),
+            metrics: None,
         };
 
         http_check.check(&backend).await.unwrap();
@@ -493,9 +496,15 @@ mod test {
 
             let discovery = discovery::Static::default();
             let mut backends = Backends::new(Box::new(discovery));
+            let strategy = RoundRobin;
             backends.set_health_check(Box::new(tcp_check));
             let result = new_good_backends();
-            backends.do_update(result.0, result.1, |_backend: Arc<BTreeSet<Backend>>| {});
+            backends.do_update(
+                &strategy,
+                result.0,
+                result.1,
+                |_backend: Arc<BTreeSet<Backend>>| {},
+            );
             // the backend is ready
             assert!(backends.ready(&good_backend));
 
@@ -519,9 +528,15 @@ mod test {
 
             let discovery = discovery::Static::default();
             let mut backends = Backends::new(Box::new(discovery));
+            let strategy = RoundRobin;
             backends.set_health_check(Box::new(https_check));
             let result = new_good_backends();
-            backends.do_update(result.0, result.1, |_backend: Arc<BTreeSet<Backend>>| {});
+            backends.do_update(
+                &strategy,
+                result.0,
+                result.1,
+                |_backend: Arc<BTreeSet<Backend>>| {},
+            );
             // the backend is ready
             assert!(backends.ready(&good_backend));
             // run health check

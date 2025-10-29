@@ -6,13 +6,13 @@ use pingora::protocols::l4::socket::SocketAddr;
 use pingora::{ErrorType, OrErr, Result};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeSet, HashMap};
-use std::fmt::Display;
+use std::fmt::{Debug, Display};
 use std::hash::{Hash, Hasher};
 use std::io::Result as IoResult;
 use std::net::ToSocketAddrs;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 mod background;
 pub mod discovery;
@@ -25,6 +25,49 @@ use strategy::BackendSelection;
 
 use crate::load_balancing::strategy::Strategy;
 use crate::load_balancing::strategy::utils::UniqueIterator;
+
+pub trait Metrics: Send + Sync + Debug {
+    fn increment_active_connections(&self) {}
+    fn decrement_active_connections(&self) {}
+    fn record_latency(&self, _latency: Duration, _alpha: f32) {}
+    fn active_connections(&self) -> Option<usize> {
+        None
+    }
+    fn average_latency(&self) -> Option<f32> {
+        None
+    }
+}
+
+pub type BackendMetrics = Option<Arc<dyn Metrics>>;
+
+impl Metrics for BackendMetrics {
+    fn increment_active_connections(&self) {
+        if let Some(metrics) = &self {
+            metrics.increment_active_connections();
+        }
+    }
+
+    fn decrement_active_connections(&self) {
+        if let Some(metrics) = &self {
+            metrics.decrement_active_connections();
+        }
+    }
+
+    fn record_latency(&self, latency: Duration, alpha: f32) {
+        if let Some(metrics) = &self {
+            metrics.record_latency(latency, alpha);
+        }
+    }
+
+    fn active_connections(&self) -> Option<usize> {
+        self.as_ref()
+            .and_then(|metrics| metrics.active_connections())
+    }
+
+    fn average_latency(&self) -> Option<f32> {
+        self.as_ref().and_then(|metrics| metrics.average_latency())
+    }
+}
 
 /// [Backend] represents a server to proxy or connect to.
 #[derive(Derivative)]
@@ -47,6 +90,11 @@ pub struct Backend {
     #[derivative(Hash = "ignore")]
     #[derivative(Ord = "ignore")]
     pub ext: Extensions,
+    #[derivative(PartialEq = "ignore")]
+    #[derivative(PartialOrd = "ignore")]
+    #[derivative(Hash = "ignore")]
+    #[derivative(Ord = "ignore")]
+    pub metrics: BackendMetrics,
 }
 
 impl Backend {
@@ -66,6 +114,7 @@ impl Backend {
             addr: SocketAddr::Inet(addr),
             weight,
             ext: Extensions::new(),
+            metrics: None,
         })
         // TODO: UDS
     }
@@ -135,19 +184,34 @@ impl Backends {
     /// Updates backends when the new is different from the current set,
     /// the callback will be invoked when the new set of backend is different
     /// from the current one so that the caller can update the selector accordingly.
-    fn do_update<F>(
+    fn do_update<F, S>(
         &self,
+        strategy: &S,
         new_backends: BTreeSet<Backend>,
         enablement: HashMap<u64, bool>,
         callback: F,
     ) where
         F: Fn(Arc<BTreeSet<Backend>>),
+        S: Strategy,
     {
         if (**self.backends.load()) != new_backends {
+            let old_backends = self.backends.load();
+            let mut backends = BTreeSet::new();
+
             let old_health = self.health.load();
             let mut health = HashMap::with_capacity(new_backends.len());
-            for backend in new_backends.iter() {
+
+            for mut backend in new_backends.into_iter() {
+                // Uses the old backend if it exists, to preserve extensions and metrics if any
+                if let Some(old_backend) = old_backends.get(&backend) {
+                    backend.ext.extend(old_backend.ext.clone());
+                    backend.metrics = old_backend.metrics.clone();
+                } else {
+                    backend.metrics = strategy.metrics();
+                }
+
                 let hash_key = backend.hash_key();
+
                 // use the default health if the backend is new
                 let backend_health = old_health.get(&hash_key).cloned().unwrap_or_default();
 
@@ -156,15 +220,16 @@ impl Backends {
                     backend_health.enable(*backend_enabled);
                 }
                 health.insert(hash_key, backend_health);
+                backends.insert(backend);
             }
 
             // TODO: put this all under 1 ArcSwap so the update is atomic
             // It's important the `callback()` executes first since computing selector backends might
             // be expensive. For example, if a caller checks `backends` to see if any are available
             // they may encounter false positives if the selector isn't ready yet.
-            let new_backends = Arc::new(new_backends);
-            callback(new_backends.clone());
-            self.backends.store(new_backends);
+            let backends = Arc::new(backends);
+            callback(backends.clone());
+            self.backends.store(backends);
             self.health.store(Arc::new(health));
         } else {
             // no backend change, just check enablement
@@ -215,12 +280,13 @@ impl Backends {
     ///
     /// The callback will be invoked when the new set of backend is different
     /// from the current one so that the caller can update the selector accordingly.
-    pub async fn update<F>(&self, callback: F) -> Result<()>
+    pub async fn update<F, S>(&self, strategy: &S, callback: F) -> Result<()>
     where
         F: Fn(Arc<BTreeSet<Backend>>),
+        S: Strategy,
     {
         let (new_backends, enablement) = self.discovery.discover().await?;
-        self.do_update(new_backends, enablement, callback);
+        self.do_update(strategy, new_backends, enablement, callback);
         Ok(())
     }
 
@@ -291,9 +357,8 @@ where
     backends: Backends,
     /// Controls what Strategy should be used when rebuilding the selector after an update.
     /// Usually a zero sized type that implements [Strategy]
-    /// Uses Mutex to ensure there are no race conditions between the `update_strategy` and `update` methods.
-    strategy: Mutex<S>,
-    selector_rebuild_frequency: Mutex<Option<Duration>>,
+    /// Uses RwLock to ensure there are no race conditions between the `update_strategy` and `update` methods.
+    strategy: RwLock<S>,
     selector: ArcSwap<S::BackendSelector>,
     /// How frequent the health check logic (if set) should run.
     ///
@@ -348,13 +413,23 @@ where
         Self::from_backends_with_strategy(backends, S::default())
     }
 
-    pub fn from_backends_with_strategy(backends: Backends, strategy: S) -> Self {
-        let selector = strategy.build_backend_selector(&backends.get_backend());
-        let selector_rebuild_frequency = strategy.rebuild_frequency();
+    pub fn from_backends_with_strategy(mut backends: Backends, strategy: S) -> Self {
+        let mut backends_ref = backends.backends.into_inner();
+        let backends_mut = Arc::make_mut(&mut backends_ref);
+        let new_backends = std::mem::take(backends_mut)
+            .into_iter()
+            .map(|mut b| {
+                b.metrics = strategy.metrics();
+                b
+            })
+            .collect();
+
+        backends.backends = ArcSwap::new(Arc::new(new_backends));
+
+        let selector = strategy.build_backend_selector(&backends_ref);
         LoadBalancer {
             backends,
-            strategy: Mutex::new(strategy),
-            selector_rebuild_frequency: Mutex::new(selector_rebuild_frequency),
+            strategy: RwLock::new(strategy),
             selector: ArcSwap::new(Arc::new(selector)),
             health_check_frequency: None,
             update_frequency: None,
@@ -367,9 +442,9 @@ where
     /// This function will be called every `update_frequency` if this [LoadBalancer] instance
     /// is running as a background service.
     pub async fn update(&self) -> Result<()> {
-        let strategy = self.strategy.lock().await;
+        let strategy = self.strategy.read().await;
         self.backends
-            .update(|backends| {
+            .update(&*strategy, |backends| {
                 self.selector
                     .store(strategy.build_backend_selector(&backends).into());
             })
@@ -377,45 +452,44 @@ where
     }
 
     pub async fn rebuild_frequency(&self) -> Option<Duration> {
-        self.selector_rebuild_frequency.lock().await.clone()
+        self.strategy.read().await.rebuild_frequency()
     }
 
     pub async fn current_strategy(&self) -> S
     where
         S: Clone,
     {
-        self.strategy.lock().await.clone()
+        self.strategy.read().await.clone()
     }
 
     pub async fn rebuild_selector(&self) {
-        let strategy = self.strategy.lock().await;
+        let strategy = self.strategy.read().await;
         self.selector.store(
             strategy
-                .build_backend_selector(&self.backends().get_backend())
+                .build_backend_selector(&*self.backends.backends.load())
                 .into(),
         );
     }
 
     /// Stores the new strategy and rebuilds the selector according to the new strategy.
     /// If this method is run on a load balancer with a static strategy, it will do nothing.
-    pub async fn update_strategy(&self, strategy: S)
+    pub async fn update_strategy(&self, strategy: S) -> bool
     where
         S: PartialEq + Display,
     {
-        let mut current_strategy = self.strategy.lock().await;
+        let mut current_strategy = self.strategy.write().await;
         if strategy == *current_strategy {
-            return;
+            return false;
         }
 
         log::info!("Updating strategy: {}", strategy);
-        let mut rebuild_frequency = self.selector_rebuild_frequency.lock().await;
-        *rebuild_frequency = strategy.rebuild_frequency();
         *current_strategy = strategy;
         self.selector.store(
             current_strategy
-                .build_backend_selector(&self.backends().get_backend())
+                .build_backend_selector(&*self.backends.backends.load())
                 .into(),
         );
+        true
     }
 
     /// Return the first healthy [Backend] according to the selection algorithm and the
@@ -471,6 +545,8 @@ where
 mod test {
     use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
+    use crate::load_balancing::strategy::RoundRobin;
+
     use super::*;
     use async_trait::async_trait;
     use pingora::Result;
@@ -500,11 +576,12 @@ mod test {
         let mut backends = Backends::new(Box::new(discovery));
         let check = health_check::TcpHealthCheck::new();
         backends.set_health_check(check);
+        let strategy = RoundRobin;
 
         // true: new backend discovered
         let updated = AtomicBool::new(false);
         backends
-            .update(|_| updated.store(true, Relaxed))
+            .update(&strategy, |_| updated.store(true, Relaxed))
             .await
             .unwrap();
         assert!(updated.load(Relaxed));
@@ -512,7 +589,7 @@ mod test {
         // false: no new backend discovered
         let updated = AtomicBool::new(false);
         backends
-            .update(|_| updated.store(true, Relaxed))
+            .update(&strategy, |_| updated.store(true, Relaxed))
             .await
             .unwrap();
         assert!(!updated.load(Relaxed));
@@ -539,9 +616,10 @@ mod test {
         discovery.add(b2.clone());
 
         let backends = Backends::new(Box::new(discovery));
+        let strategy = RoundRobin;
 
         // fill in the backends
-        backends.update(|_| {}).await.unwrap();
+        backends.update(&strategy, |_| {}).await.unwrap();
 
         let backend = backends.get_backend();
         assert!(backend.contains(&b1));
@@ -578,11 +656,12 @@ mod test {
         let discovery = TestDiscovery(discovery);
 
         let backends = Backends::new(Box::new(discovery));
+        let strategy = RoundRobin;
 
         // true: new backend discovered
         let updated = AtomicBool::new(false);
         backends
-            .update(|_| updated.store(true, Relaxed))
+            .update(&strategy, |_| updated.store(true, Relaxed))
             .await
             .unwrap();
         assert!(updated.load(Relaxed));
@@ -610,11 +689,12 @@ mod test {
         let mut backends = Backends::new(Box::new(discovery));
         let check = health_check::TcpHealthCheck::new();
         backends.set_health_check(check);
+        let strategy = RoundRobin;
 
         // true: new backend discovered
         let updated = AtomicBool::new(false);
         backends
-            .update(|_| updated.store(true, Relaxed))
+            .update(&strategy, |_| updated.store(true, Relaxed))
             .await
             .unwrap();
         assert!(updated.load(Relaxed));

@@ -64,6 +64,7 @@ impl Static {
                 addr: SocketAddr::Inet(addr),
                 weight: 1,
                 ext: Extensions::new(),
+                metrics: None,
             });
             upstreams.extend(addrs);
         }
