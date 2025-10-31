@@ -1,5 +1,3 @@
-use std::fmt::Display;
-
 use http::{Method, Response, StatusCode};
 use pingora::{
     apps::http_app::ServeHttp, protocols::http::ServerSession, services::listening::Service,
@@ -10,18 +8,6 @@ use tracing::{error, info};
 use crate::{
     load_balancing::strategy::Adaptive, proxy::Proxy, utils::constants::SET_STRATEGY_ENDPOINT_NAME,
 };
-
-impl Display for Adaptive {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Adaptive::RoundRobin => write!(f, "RoundRobin"),
-            Adaptive::Random => write!(f, "Random"),
-            Adaptive::FNVHash => write!(f, "FNVHash"),
-            Adaptive::FewestConnections => write!(f, "FewestConnection"),
-            Adaptive::Consistent => write!(f, "Consistent"),
-        }
-    }
-}
 
 #[derive(Deserialize)]
 struct NewStrategy {
@@ -68,8 +54,12 @@ impl ServeHttp for SetStrategyEndpoint {
                 match serde_json::from_slice::<NewStrategy>(&body) {
                     Ok(NewStrategy { path, strategy }) => match self.router.route(&path) {
                         Ok((route_value, _)) => {
-                            route_value.lb.update_strategy(strategy.clone()).await;
-                            info!("Strategy updated to {} for {}", strategy, path);
+                            if route_value.lb.update_strategy(strategy.clone()).await {
+                                info!("Strategy updated to {} for {}", &strategy, path);
+                            } else {
+                                error!("Strategy already in use {}", strategy);
+                            };
+
                             response(StatusCode::OK)
                         }
                         Err(err) => {

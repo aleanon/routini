@@ -48,7 +48,7 @@ impl AdaptiveLoadBalancer {
         self.lb.select(key, self.config.max_iterations)
     }
 
-    pub async fn update_strategy(&self, new_strategy: Adaptive) {
-        self.lb.update_strategy(new_strategy).await;
+    pub async fn update_strategy(&self, new_strategy: Adaptive) -> bool {
+        self.lb.update_strategy(new_strategy).await
     }
 }
