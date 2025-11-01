@@ -6,14 +6,14 @@ use pingora::{
     Error, ErrorSource, ErrorType, ImmutStr, Result, RetryType,
     http::{RequestHeader, ResponseHeader},
     prelude::HttpPeer,
-    protocols::{Digest, l4::socket::SocketAddr},
+    protocols::Digest,
     proxy::{ProxyHttp, Session},
-    upstreams::peer::Tracer,
 };
 
 use crate::{
     adaptive_loadbalancer::AdaptiveLoadBalancer,
-    load_balancing::strategy::fewest_connections::ConnectionsTracer, server_builder::RouteConfig,
+    load_balancing::{Backend, Metrics},
+    server_builder::RouteConfig,
     utils::constants::PATH_REMAINDER_IDENTIFIER,
 };
 
@@ -35,7 +35,6 @@ impl Proxy {
     }
 
     pub fn route(&self, path: &str) -> Result<(&RouteValue, Option<String>)> {
-        tracing::info!("route path: {}", path);
         self.routes
             .at(path)
             .map_err(|e| {
@@ -72,7 +71,7 @@ impl Proxy {
 pub struct ConnectionCTX {
     upstream_start: Option<Instant>,
     lb: Option<Arc<AdaptiveLoadBalancer>>,
-    backend_addr: Option<SocketAddr>,
+    backend: Option<Backend>,
 }
 
 #[async_trait::async_trait]
@@ -83,7 +82,7 @@ impl ProxyHttp for Proxy {
         ConnectionCTX {
             upstream_start: None,
             lb: None,
-            backend_addr: None,
+            backend: None,
         }
     }
 
@@ -93,7 +92,7 @@ impl ProxyHttp for Proxy {
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
         let path = session.req_header().uri.path();
-        let (route_value, new_path) = self.route(path)?;
+        let (route_value, stripped_path) = self.route(path)?;
 
         let backend = route_value.lb.select(&[]).ok_or(Error {
             context: Some(ImmutStr::Static("No healthy backends available")),
@@ -103,17 +102,22 @@ impl ProxyHttp for Proxy {
             retry: RetryType::Decided(true),
         })?;
 
-        if let Some(path) = new_path {
+        if let Some(path) = stripped_path {
             session.req_header_mut().set_raw_path(path.as_bytes())?;
         }
 
-        ctx.backend_addr = Some(backend.addr.clone());
+        let peer = match backend.ext.get::<HttpPeer>() {
+            Some(peer) => peer.clone(),
+            None => {
+                log::error!("HttpPeer not attached to backend: {}", &backend.addr);
+                HttpPeer::new(backend.addr.clone(), false, String::new())
+            }
+        };
+
+        ctx.backend = Some(backend);
         ctx.lb = Some(route_value.lb.clone());
 
-        let tracer = Tracer(Box::new(ConnectionsTracer(backend.addr.clone())));
-        let mut peer = Box::new(HttpPeer::new(backend, false, String::new()));
-        peer.options.tracer = Some(tracer);
-        Ok(peer)
+        Ok(Box::new(peer))
     }
 
     async fn upstream_request_filter(
@@ -134,9 +138,11 @@ impl ProxyHttp for Proxy {
     ) -> Result<()> {
         if let Some(start) = ctx.upstream_start {
             let latency = start.elapsed();
-            if let Some(lb) = ctx.lb.clone() {
-                if let Some(addr) = &ctx.backend_addr {
-                    lb.record_latency(addr.clone(), latency).await;
+            if let Some(lb) = &ctx.lb {
+                if let Some(backend) = &ctx.backend {
+                    backend
+                        .metrics
+                        .record_latency(latency, lb.config.latency_smoothing_factor);
                 }
             }
         }
@@ -158,10 +164,8 @@ impl ProxyHttp for Proxy {
     where
         Self::CTX: Send + Sync,
     {
-        if let Some(lb) = &ctx.lb {
-            if let Some(addr) = &ctx.backend_addr {
-                lb.increment_connections(addr.clone()).await;
-            }
+        if let Some(backend) = &ctx.backend {
+            backend.metrics.increment_active_connections();
         }
         Ok(())
     }
@@ -189,22 +193,25 @@ impl ProxyHttp for Proxy {
     ) where
         Self::CTX: Send + Sync,
     {
-        if let Some(lb) = &ctx.lb {
-            if let Some(addr) = &ctx.backend_addr {
-                lb.decrement_connections(addr.clone()).await;
-            }
+        if let Some(backend) = &ctx.backend {
+            backend.metrics.decrement_active_connections();
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
+    use crate::load_balancing::{Backends, discovery::Static};
+
     use super::*;
 
     fn create_test_route_value(strip_path: bool) -> RouteValue {
-        let backends = vec!["127.0.0.1:8080".to_string()];
-        let lb = AdaptiveLoadBalancer::try_from_iter(backends, None)
-            .expect("Failed to create load balancer");
+        let mut backends = BTreeSet::new();
+        backends.insert(Backend::new("127.0.0.1:8080").unwrap());
+        let backends = Backends::new(Static::new(backends));
+        let lb = AdaptiveLoadBalancer::from_backends(backends, None);
 
         RouteValue {
             lb: Arc::new(lb),

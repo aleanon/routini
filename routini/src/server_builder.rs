@@ -1,16 +1,24 @@
-use std::{net::TcpListener, sync::LazyLock, time::Duration};
+use std::{collections::BTreeSet, net::TcpListener, sync::LazyLock, thread, time::Duration};
 
 use color_eyre::eyre::{Result, eyre};
 use matchit::Router;
-use pingora::{prelude::background_service, proxy::http_proxy_service, server::Server};
+use pingora::{
+    prelude::{HttpPeer, background_service},
+    proxy::http_proxy_service,
+    server::{Server, configuration::ServerConf},
+    services::listening::Service,
+};
 use regex::Regex;
 
 use crate::{
     adaptive_loadbalancer::{AdaptiveLoadBalancer, options::AdaptiveLbOpt},
-    load_balancing::strategy::Adaptive,
+    load_balancing::{Backend, Backends, discovery::Static, strategy::Adaptive},
     proxy::{Proxy, RouteValue},
     set_strategy_endpoint::SetStrategyEndpoint,
-    utils::constants::{DEFAULT_MAX_ALGORITHM_ITERATIONS, WILDCARD_IDENTIFIER},
+    utils::constants::{
+        DEFAULT_HEALTH_CHECK_FREQUENCY, DEFAULT_MAX_ALGORITHM_ITERATIONS,
+        PROMETHEUS_ENDPOINT_ADDRESS, WILDCARD_IDENTIFIER,
+    },
 };
 
 const PATH_REGEX_PATTERN: &str = r"^/[^*]*\*?$";
@@ -51,7 +59,7 @@ impl Default for RouteConfig {
 
 pub struct Route {
     pub path: String,
-    pub backends: Vec<String>,
+    pub backends: Backends,
     pub lb_strategy: Adaptive,
     pub health_check_frequency: Option<Duration>,
     pub max_iterations: usize,
@@ -59,7 +67,7 @@ pub struct Route {
 }
 
 impl Route {
-    pub fn new<A: ToString>(
+    pub fn new<A: AsRef<str>>(
         path: impl AsRef<str>,
         backends: impl IntoIterator<Item = A>,
         lb_strategy: Adaptive,
@@ -73,8 +81,13 @@ impl Route {
 
         let backends = backends
             .into_iter()
-            .map(|a| a.to_string())
-            .collect::<Vec<_>>();
+            .map(|addr| {
+                let mut backend = Backend::new(addr.as_ref()).expect("Invalid backend address");
+                let http_peer = HttpPeer::new(backend.addr.clone(), false, String::new());
+                backend.ext.insert(http_peer);
+                backend
+            })
+            .collect::<BTreeSet<_>>();
 
         if backends.is_empty() {
             return Err(eyre!("Must provide at least one backend"));
@@ -82,9 +95,9 @@ impl Route {
 
         Ok(Route {
             path,
-            backends,
+            backends: Backends::new(Static::new(backends)),
             lb_strategy,
-            health_check_frequency: Some(Duration::from_secs(1)),
+            health_check_frequency: Some(DEFAULT_HEALTH_CHECK_FREQUENCY),
             max_iterations: DEFAULT_MAX_ALGORITHM_ITERATIONS,
             route_config: RouteConfig::default(),
         })
@@ -96,7 +109,7 @@ impl Route {
         self
     }
 
-    /// Default: Some(Duration::from_secs(10))
+    /// Default: Some(Duration::from_secs(1))
     /// set to None to not run health check background service
     pub fn include_health_check(mut self, update_frequency: Option<Duration>) -> Self {
         self.health_check_frequency = update_frequency;
@@ -133,7 +146,11 @@ impl ServerBuilder {
 
     pub fn build(self) -> Server {
         assert!(!self.routes.is_empty(), "requires at least one route");
-        let mut server = Server::new(None).expect("Unable to create server instance");
+        let mut server_config = ServerConf::default();
+        // Increase connection pool size for high concurrency scenarios
+        // Default is 128, but with thousands of concurrent requests we need much more
+        server_config.upstream_keepalive_pool_size = 100000;
+        let mut server = Server::new_with_opt_and_conf(None, server_config);
 
         let mut routes = Router::new();
         for route in self.routes {
@@ -144,11 +161,11 @@ impl ServerBuilder {
                 ..Default::default()
             };
 
-            let lb = AdaptiveLoadBalancer::try_from_iter(route.backends, Some(lb_options))
-                .expect("Failed to parse backend addresses");
+            let lb = AdaptiveLoadBalancer::from_backends(route.backends, Some(lb_options));
 
             let service_name = format!("adaptive-lb-{}", &route.path);
-            let background_service = background_service(&service_name, lb);
+            let mut background_service = background_service(&service_name, lb);
+            background_service.threads = Some(1);
             let task = background_service.task();
             server.add_service(background_service);
 
@@ -171,8 +188,14 @@ impl ServerBuilder {
         }
 
         let mut router_service = http_proxy_service(&server.configuration, router);
+        let available_parallelism = thread::available_parallelism().map(Into::into).unwrap_or(1);
+        router_service.threads = Some(available_parallelism);
         router_service.add_tcp(&self.address);
         server.add_service(router_service);
+
+        let mut prometheus = Service::prometheus_http_service();
+        prometheus.add_tcp(PROMETHEUS_ENDPOINT_ADDRESS);
+        server.add_service(prometheus);
 
         server.bootstrap();
         server
@@ -189,7 +212,7 @@ mod tests {
         assert!(route.is_ok());
         let route = route.unwrap();
         assert_eq!(route.path, "/api");
-        assert_eq!(route.backends.len(), 1);
+        assert_eq!(route.backends.get_backend().len(), 1);
     }
 
     #[test]
@@ -265,7 +288,7 @@ mod tests {
         );
         assert!(route.is_ok());
         let route = route.unwrap();
-        assert_eq!(route.backends.len(), 3);
+        assert_eq!(route.backends.get_backend().len(), 3);
     }
 
     #[test]
