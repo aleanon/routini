@@ -28,9 +28,11 @@ impl TestApp {
             .map(|l| l.local_addr().map(|addr| addr.to_string()))
             .collect::<io::Result<Vec<_>>>()?;
 
-        tokio::spawn(async move {
-            workers::Workers::run(backend_listeners).await;
-        });
+        for listener in backend_listeners {
+            tokio::spawn(async move {
+                worker::Worker::run(listener).await;
+            });
+        }
 
         let backend_addr_clone = backend_addresses.clone();
         std::thread::spawn(move || {

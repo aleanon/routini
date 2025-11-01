@@ -8,10 +8,6 @@ pub struct TestApp {
 }
 
 impl TestApp {
-    /// Creates a new test proxy server with the given routes.
-    ///
-    /// If `num_backends` is provided, it will spawn that many backend servers
-    /// and return their addresses for use in route configuration.
     pub async fn new(routes: Vec<Route>) -> io::Result<Self> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         let server_address = format!("http://{}", listener.local_addr()?);
@@ -49,9 +45,11 @@ impl TestApp {
             .map(|l| l.local_addr().map(|addr| addr.to_string()))
             .collect::<io::Result<Vec<_>>>()?;
 
-        tokio::spawn(async move {
-            workers::Workers::run(backend_listeners).await;
-        });
+        for listener in backend_listeners {
+            tokio::spawn(async move {
+                worker::Worker::run(listener).await;
+            });
+        }
 
         // Give backends time to start
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
