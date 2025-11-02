@@ -1,0 +1,10 @@
+.env
+target/
+*worker/target
+tests/
+Dockerfile
+.git/
+*.md
+test*
+LICENSE
+Justfile
