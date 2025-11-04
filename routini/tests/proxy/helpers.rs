@@ -24,13 +24,33 @@ impl TestApp {
             .build()
             .expect("Failed to build http client");
 
-        // Give the server a moment to start
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        Ok(Self {
+        let app = Self {
             server_address,
             http_client,
-        })
+        };
+
+        // Wait for server to be ready by trying to connect
+        for attempt in 0..50 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            // Try a basic connection to see if server is up
+            if app
+                .http_client
+                .get(&app.server_address)
+                .send()
+                .await
+                .is_ok()
+            {
+                return Ok(app);
+            }
+            if attempt == 49 {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Server did not become ready in time",
+                ));
+            }
+        }
+
+        Ok(app)
     }
 
     /// Creates backend servers and returns their addresses
@@ -51,8 +71,27 @@ impl TestApp {
             });
         }
 
-        // Give backends time to start
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        // Wait for backends to be ready
+        let client = reqwest::Client::new();
+        for backend_addr in &backend_addresses {
+            for attempt in 0..50 {
+                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                if client
+                    .get(format!("http://{}/health", backend_addr))
+                    .send()
+                    .await
+                    .is_ok()
+                {
+                    break;
+                }
+                if attempt == 49 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!("Backend {} did not become ready in time", backend_addr),
+                    ));
+                }
+            }
+        }
 
         Ok(backend_addresses)
     }

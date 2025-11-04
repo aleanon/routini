@@ -52,11 +52,34 @@ impl TestApp {
             .build()
             .expect("Failed to build http client");
 
-        Ok(Self {
+        let app = Self {
             server_address,
             backend_addresses,
             http_client,
-        })
+        };
+
+        // Wait for server to be ready by polling the health endpoint
+        for attempt in 0..50 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            if let Ok(response) = app
+                .http_client
+                .get(format!("{}/health", app.server_address))
+                .send()
+                .await
+            {
+                if response.status().is_success() {
+                    return Ok(app);
+                }
+            }
+            if attempt == 49 {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Server did not become ready in time",
+                ));
+            }
+        }
+
+        Ok(app)
     }
 
     pub async fn get_health_check(&self) -> reqwest::Response {

@@ -206,12 +206,17 @@ impl ServerBuilder {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_route_valid_simple_path() {
+    #[tokio::test]
+    async fn test_route_valid_simple_path() {
         let route = Route::new("/api", vec!["127.0.0.1:8080"], Adaptive::default());
         assert!(route.is_ok());
         let route = route.unwrap();
         assert_eq!(route.path, "/api");
+
+        // Initialize backends from discovery
+        let strategy = route.lb_strategy.clone();
+        route.backends.update(&strategy, |_| {}).await.unwrap();
+
         assert_eq!(route.backends.get_backend().len(), 1);
     }
 
@@ -279,8 +284,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_route_multiple_valid_backends() {
+    #[tokio::test]
+    async fn test_route_multiple_valid_backends() {
         let route = Route::new(
             "/api",
             vec!["127.0.0.1:8080", "127.0.0.1:8081", "127.0.0.1:8082"],
@@ -288,6 +293,11 @@ mod tests {
         );
         assert!(route.is_ok());
         let route = route.unwrap();
+
+        // Initialize backends from discovery
+        let strategy = route.lb_strategy.clone();
+        route.backends.update(&strategy, |_| {}).await.unwrap();
+
         assert_eq!(route.backends.get_backend().len(), 3);
     }
 
