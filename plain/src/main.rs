@@ -7,7 +7,6 @@ use pingora::{
     prelude::{HttpPeer, RoundRobin, TcpHealthCheck, background_service},
     proxy::{ProxyHttp, Session, http_proxy_service},
     server::{Server, configuration::ServerConf},
-    upstreams,
 };
 
 #[global_allocator]
