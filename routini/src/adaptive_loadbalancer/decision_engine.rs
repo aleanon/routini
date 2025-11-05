@@ -2,10 +2,23 @@ use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
 use crate::{
     adaptive_loadbalancer::options::AdaptiveLbOpt,
-    load_balancing::{Backend, Metrics, strategy::Adaptive},
+    load_balancing::{
+        Backend, Metrics,
+        strategy::{Adaptive, Strategy},
+    },
 };
 
-pub struct DecisionEngine {
+pub trait DecisionEngine {
+    type Strategy: Strategy;
+
+    fn evaluate_strategy(
+        &self,
+        current_strategy: &Self::Strategy,
+        backends: &Arc<BTreeSet<Backend>>,
+    ) -> Self::Strategy;
+}
+
+pub struct AdaptiveDecisionEngine {
     pub evaluate_strategy_frequency: Duration,
     pub connections_divergence_ratio: f32,
     pub latency_divergence_ratio: f32,
@@ -14,76 +27,13 @@ pub struct DecisionEngine {
     pub min_nr_of_connections: usize,
 }
 
-impl DecisionEngine {
+impl AdaptiveDecisionEngine {
     pub fn new(opt: &AdaptiveLbOpt) -> Self {
         Self {
             evaluate_strategy_frequency: opt.evaluate_strategy_frequency.clone(),
             connections_divergence_ratio: opt.connections_divergence_ratio.clone(),
             latency_divergence_ratio: opt.latency_divergence_ratio.clone(),
             min_nr_of_connections: opt.min_nr_of_connections.clone(),
-        }
-    }
-
-    pub async fn evaluate_strategy(
-        &self,
-        current_strategy: &Adaptive,
-        backends: &Arc<BTreeSet<Backend>>,
-    ) -> Adaptive {
-        match current_strategy {
-            Adaptive::FastestServer => {
-                if self.should_use_fewest_connections(backends, self.min_nr_of_connections) {
-                    return Adaptive::FewestConnections;
-                }
-                if self.should_use_fastest_server(backends) {
-                    return Adaptive::FastestServer;
-                }
-                Adaptive::RoundRobin
-            }
-            Adaptive::FewestConnections => {
-                if self.should_use_fastest_server(backends) {
-                    return Adaptive::FastestServer;
-                }
-                if self.should_use_fewest_connections(backends, self.min_nr_of_connections) {
-                    return Adaptive::FewestConnections;
-                }
-                Adaptive::RoundRobin
-            }
-            Adaptive::FNVHash => {
-                if self.should_use_fastest_server(backends) {
-                    return Adaptive::FastestServer;
-                }
-                if self.should_use_fewest_connections(backends, self.min_nr_of_connections) {
-                    return Adaptive::FewestConnections;
-                }
-                Adaptive::FNVHash
-            }
-            Adaptive::RoundRobin => {
-                if self.should_use_fastest_server(backends) {
-                    return Adaptive::FastestServer;
-                }
-                if self.should_use_fewest_connections(backends, self.min_nr_of_connections) {
-                    return Adaptive::FewestConnections;
-                }
-                Adaptive::RoundRobin
-            }
-            Adaptive::Random => {
-                if self.should_use_fastest_server(backends) {
-                    return Adaptive::FastestServer;
-                }
-                if self.should_use_fewest_connections(backends, self.min_nr_of_connections) {
-                    return Adaptive::FewestConnections;
-                }
-                Adaptive::Random
-            }
-            Adaptive::Consistent => {
-                if self.should_use_fastest_server(backends) {
-                    return Adaptive::FastestServer;
-                }
-                if self.should_use_fewest_connections(backends, self.min_nr_of_connections) {
-                    return Adaptive::FewestConnections;
-                }
-                Adaptive::Consistent
-            }
         }
     }
 
@@ -145,5 +95,72 @@ impl DecisionEngine {
             return true;
         }
         false
+    }
+}
+
+impl DecisionEngine for AdaptiveDecisionEngine {
+    type Strategy = Adaptive;
+
+    fn evaluate_strategy(
+        &self,
+        current_strategy: &Self::Strategy,
+        backends: &Arc<BTreeSet<Backend>>,
+    ) -> Self::Strategy {
+        match current_strategy {
+            Adaptive::FastestServer => {
+                if self.should_use_fewest_connections(backends, self.min_nr_of_connections) {
+                    return Adaptive::FewestConnections;
+                }
+                if self.should_use_fastest_server(backends) {
+                    return Adaptive::FastestServer;
+                }
+                Adaptive::RoundRobin
+            }
+            Adaptive::FewestConnections => {
+                if self.should_use_fastest_server(backends) {
+                    return Adaptive::FastestServer;
+                }
+                if self.should_use_fewest_connections(backends, self.min_nr_of_connections) {
+                    return Adaptive::FewestConnections;
+                }
+                Adaptive::RoundRobin
+            }
+            Adaptive::FNVHash => {
+                if self.should_use_fastest_server(backends) {
+                    return Adaptive::FastestServer;
+                }
+                if self.should_use_fewest_connections(backends, self.min_nr_of_connections) {
+                    return Adaptive::FewestConnections;
+                }
+                Adaptive::FNVHash
+            }
+            Adaptive::RoundRobin => {
+                if self.should_use_fastest_server(backends) {
+                    return Adaptive::FastestServer;
+                }
+                if self.should_use_fewest_connections(backends, self.min_nr_of_connections) {
+                    return Adaptive::FewestConnections;
+                }
+                Adaptive::RoundRobin
+            }
+            Adaptive::Random => {
+                if self.should_use_fastest_server(backends) {
+                    return Adaptive::FastestServer;
+                }
+                if self.should_use_fewest_connections(backends, self.min_nr_of_connections) {
+                    return Adaptive::FewestConnections;
+                }
+                Adaptive::Random
+            }
+            Adaptive::Consistent => {
+                if self.should_use_fastest_server(backends) {
+                    return Adaptive::FastestServer;
+                }
+                if self.should_use_fewest_connections(backends, self.min_nr_of_connections) {
+                    return Adaptive::FewestConnections;
+                }
+                Adaptive::Consistent
+            }
+        }
     }
 }

@@ -1,5 +1,6 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use routini::adaptive_loadbalancer::AdaptiveLoadBalancer;
+use routini::adaptive_loadbalancer::decision_engine::AdaptiveDecisionEngine;
 use routini::adaptive_loadbalancer::options::AdaptiveLbOpt;
 use routini::load_balancing::discovery::Static;
 use routini::load_balancing::strategy::Adaptive;
@@ -35,7 +36,12 @@ fn benchmark_adaptive_lb_select(c: &mut Criterion) {
         group.throughput(Throughput::Elements(1));
 
         let backends = create_backends(count);
-        let lb = AdaptiveLoadBalancer::from_backends(Backends::new(Static::new(backends)), None);
+        let decision_engine = AdaptiveDecisionEngine::new(&AdaptiveLbOpt::default());
+        let lb = AdaptiveLoadBalancer::from_backends(
+            Backends::new(Static::new(backends)),
+            None,
+            decision_engine,
+        );
 
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("{}_backends", count)),
@@ -74,9 +80,11 @@ fn benchmark_adaptive_lb_strategies(c: &mut Criterion) {
             ..Default::default()
         };
 
+        let decision_engine = AdaptiveDecisionEngine::new(&opts);
         let lb = AdaptiveLoadBalancer::from_backends(
             Backends::new(Static::new(backends.clone())),
             Some(opts),
+            decision_engine,
         );
 
         group.bench_with_input(BenchmarkId::from_parameter(name), name, |b, _| {
@@ -96,7 +104,12 @@ fn benchmark_adaptive_lb_different_keys(c: &mut Criterion) {
     let backend_count = 100;
     let backends = create_backends(backend_count);
 
-    let lb = AdaptiveLoadBalancer::from_backends(Backends::new(Static::new(backends)), None);
+    let decision_engine = AdaptiveDecisionEngine::new(&AdaptiveLbOpt::default());
+    let lb = AdaptiveLoadBalancer::from_backends(
+        Backends::new(Static::new(backends)),
+        None,
+        decision_engine,
+    );
 
     group.bench_function("same_key", |b| {
         b.iter(|| {
@@ -125,7 +138,12 @@ fn benchmark_adaptive_lb_concurrent_selects(c: &mut Criterion) {
 
     for &count in &backend_counts {
         let backends = create_backends(count);
-        let lb = AdaptiveLoadBalancer::from_backends(Backends::new(Static::new(backends)), None);
+        let decision_engine = AdaptiveDecisionEngine::new(&AdaptiveLbOpt::default());
+        let lb = AdaptiveLoadBalancer::from_backends(
+            Backends::new(Static::new(backends)),
+            None,
+            decision_engine,
+        );
 
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("{}_backends", count)),
@@ -163,9 +181,11 @@ fn benchmark_adaptive_lb_with_max_iterations(c: &mut Criterion) {
             ..Default::default()
         };
 
+        let decision_engine = AdaptiveDecisionEngine::new(&opts);
         let lb = AdaptiveLoadBalancer::from_backends(
             Backends::new(Static::new(backends.clone())),
             Some(opts),
+            decision_engine,
         );
 
         group.bench_with_input(
@@ -189,7 +209,12 @@ fn benchmark_adaptive_lb_update_strategy(c: &mut Criterion) {
     let backend_count = 100;
     let backends = create_backends(backend_count);
 
-    let lb = AdaptiveLoadBalancer::from_backends(Backends::new(Static::new(backends)), None);
+    let decision_engine = AdaptiveDecisionEngine::new(&AdaptiveLbOpt::default());
+    let lb = AdaptiveLoadBalancer::from_backends(
+        Backends::new(Static::new(backends)),
+        None,
+        decision_engine,
+    );
 
     // Create a Tokio runtime for async benchmarking
     let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -220,7 +245,12 @@ fn benchmark_adaptive_lb_backends_access(c: &mut Criterion) {
 
     for &count in &backend_counts {
         let backends = create_backends(count);
-        let lb = AdaptiveLoadBalancer::from_backends(Backends::new(Static::new(backends)), None);
+        let decision_engine = AdaptiveDecisionEngine::new(&AdaptiveLbOpt::default());
+        let lb = AdaptiveLoadBalancer::from_backends(
+            Backends::new(Static::new(backends)),
+            None,
+            decision_engine,
+        );
 
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("{}_backends", count)),

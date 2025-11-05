@@ -1,6 +1,7 @@
 /target
 flamegraph.svg
 perf.data
+PRODUCTION_READINESS.md
 
 # Environment variables
 .env

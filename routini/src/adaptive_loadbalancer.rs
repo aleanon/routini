@@ -13,14 +13,18 @@ use crate::{
         Backend, Backends, LoadBalancer, health_check::TcpHealthCheck, strategy::Adaptive,
     },
 };
-pub struct AdaptiveLoadBalancer {
+pub struct AdaptiveLoadBalancer<D> {
     lb: LoadBalancer<Adaptive>,
-    decision_engine: DecisionEngine,
+    decision_engine: D,
     pub config: AdaptiveLbConfig,
 }
 
-impl AdaptiveLoadBalancer {
-    pub fn from_backends(backends: Backends, options: Option<AdaptiveLbOpt>) -> Self {
+impl<D: DecisionEngine> AdaptiveLoadBalancer<D> {
+    pub fn from_backends(
+        backends: Backends,
+        options: Option<AdaptiveLbOpt>,
+        decision_engine: D,
+    ) -> Self {
         let options = options.unwrap_or_default();
         let mut lb =
             LoadBalancer::from_backends_with_strategy(backends, options.starting_strategy.clone());
@@ -30,8 +34,6 @@ impl AdaptiveLoadBalancer {
             lb.set_health_check(hc);
             lb.health_check_frequency = options.health_check_interval.clone()
         }
-
-        let decision_engine = DecisionEngine::new(&options);
 
         Self {
             lb,

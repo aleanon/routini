@@ -5,10 +5,13 @@ use log::error;
 use pingora::{server::ShutdownWatch, services::background::BackgroundService};
 use tokio::time::Instant;
 
-use crate::adaptive_loadbalancer::AdaptiveLoadBalancer;
+use crate::adaptive_loadbalancer::{
+    AdaptiveLoadBalancer,
+    decision_engine::{AdaptiveDecisionEngine, DecisionEngine},
+};
 
 #[async_trait]
-impl BackgroundService for AdaptiveLoadBalancer {
+impl BackgroundService for AdaptiveLoadBalancer<AdaptiveDecisionEngine> {
     async fn start(&self, shutdown: ShutdownWatch) -> () {
         // 136 years
         const NEVER: Duration = Duration::from_secs(u32::MAX as u64);
@@ -44,8 +47,7 @@ impl BackgroundService for AdaptiveLoadBalancer {
                 let backends = self.lb.backends().get_backend();
                 let strategy = self
                     .decision_engine
-                    .evaluate_strategy(&current_strategy, &backends)
-                    .await;
+                    .evaluate_strategy(&current_strategy, &backends);
 
                 let was_updated = self.lb.update_strategy(strategy).await;
                 next_strategy_eval = now + self.decision_engine.evaluate_strategy_frequency;

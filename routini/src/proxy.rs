@@ -11,14 +11,14 @@ use pingora::{
 };
 
 use crate::{
-    adaptive_loadbalancer::AdaptiveLoadBalancer,
+    adaptive_loadbalancer::{AdaptiveLoadBalancer, decision_engine::AdaptiveDecisionEngine},
     load_balancing::{Backend, Metrics},
     server_builder::RouteConfig,
     utils::constants::DEFAULT_PATH_REMAINDER_IDENTIFIER,
 };
 
 pub struct RouteValue {
-    pub lb: Arc<AdaptiveLoadBalancer>,
+    pub lb: Arc<AdaptiveLoadBalancer<AdaptiveDecisionEngine>>,
     pub route_config: RouteConfig,
 }
 
@@ -70,7 +70,7 @@ impl Proxy {
 
 pub struct ConnectionCTX {
     upstream_start: Option<Instant>,
-    lb: Option<Arc<AdaptiveLoadBalancer>>,
+    lb: Option<Arc<AdaptiveLoadBalancer<AdaptiveDecisionEngine>>>,
     backend: Option<Backend>,
 }
 
@@ -203,7 +203,10 @@ impl ProxyHttp for Proxy {
 mod tests {
     use std::collections::BTreeSet;
 
-    use crate::load_balancing::{Backends, discovery::Static};
+    use crate::{
+        adaptive_loadbalancer::options::AdaptiveLbOpt,
+        load_balancing::{Backends, discovery::Static},
+    };
 
     use super::*;
 
@@ -211,7 +214,8 @@ mod tests {
         let mut backends = BTreeSet::new();
         backends.insert(Backend::new("127.0.0.1:8080").unwrap());
         let backends = Backends::new(Static::new(backends));
-        let lb = AdaptiveLoadBalancer::from_backends(backends, None);
+        let decision_engine = AdaptiveDecisionEngine::new(&AdaptiveLbOpt::default());
+        let lb = AdaptiveLoadBalancer::from_backends(backends, None, decision_engine);
 
         RouteValue {
             lb: Arc::new(lb),

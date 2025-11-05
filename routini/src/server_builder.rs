@@ -11,7 +11,9 @@ use pingora::{
 use regex::Regex;
 
 use crate::{
-    adaptive_loadbalancer::{AdaptiveLoadBalancer, options::AdaptiveLbOpt},
+    adaptive_loadbalancer::{
+        AdaptiveLoadBalancer, decision_engine::AdaptiveDecisionEngine, options::AdaptiveLbOpt,
+    },
     load_balancing::{Backend, Backends, discovery::Static, strategy::Adaptive},
     proxy::{Proxy, RouteValue},
     set_strategy_endpoint::SetStrategyEndpoint,
@@ -37,6 +39,7 @@ pub fn proxy_server(listener: TcpListener) -> ServerBuilder {
         address,
         routes: Vec::new(),
         set_strategy_endpoint: None,
+        server_config: None,
     }
 }
 
@@ -132,6 +135,7 @@ pub struct ServerBuilder {
     address: String,
     routes: Vec<Route>,
     set_strategy_endpoint: Option<String>,
+    server_config: Option<ServerConf>,
 }
 impl ServerBuilder {
     pub fn add_route(mut self, route: impl Into<Route>) -> Self {
@@ -144,11 +148,14 @@ impl ServerBuilder {
         self
     }
 
+    pub fn server_config(mut self, server_config: ServerConf) -> Self {
+        self.server_config = Some(server_config);
+        self
+    }
+
     pub fn build(self) -> Server {
         assert!(!self.routes.is_empty(), "requires at least one route");
-        let mut server_config = ServerConf::default();
-        // Increase connection pool size for high concurrency scenarios
-        // Default is 128, but with thousands of concurrent requests we need much more
+        let mut server_config = self.server_config.unwrap_or(ServerConf::default());
         server_config.upstream_keepalive_pool_size = 100000;
         let mut server = Server::new_with_opt_and_conf(None, server_config);
 
@@ -161,7 +168,12 @@ impl ServerBuilder {
                 ..Default::default()
             };
 
-            let lb = AdaptiveLoadBalancer::from_backends(route.backends, Some(lb_options));
+            let decision_engine = AdaptiveDecisionEngine::new(&lb_options);
+            let lb = AdaptiveLoadBalancer::from_backends(
+                route.backends,
+                Some(lb_options),
+                decision_engine,
+            );
 
             let service_name = format!("adaptive-lb-{}", &route.path);
             let mut background_service = background_service(&service_name, lb);
