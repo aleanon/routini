@@ -17,7 +17,7 @@ use crate::{
     set_strategy_endpoint::SetStrategyEndpoint,
     utils::constants::{
         DEFAULT_HEALTH_CHECK_FREQUENCY, DEFAULT_MAX_ALGORITHM_ITERATIONS,
-        PROMETHEUS_ENDPOINT_ADDRESS, WILDCARD_IDENTIFIER,
+        DEFAULT_WILDCARD_IDENTIFIER, PROMETHEUS_ENDPOINT_ADDRESS,
     },
 };
 
@@ -77,7 +77,7 @@ impl Route {
                 "Invalid path, it must start with '/', have at most one * and any eventual * must be at the end of the string"
             ));
         }
-        let path = path.as_ref().replacen("*", WILDCARD_IDENTIFIER, 1);
+        let path = path.as_ref().replacen("*", DEFAULT_WILDCARD_IDENTIFIER, 1);
 
         let backends = backends
             .into_iter()

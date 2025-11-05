@@ -14,7 +14,7 @@ use crate::{
     adaptive_loadbalancer::AdaptiveLoadBalancer,
     load_balancing::{Backend, Metrics},
     server_builder::RouteConfig,
-    utils::constants::PATH_REMAINDER_IDENTIFIER,
+    utils::constants::DEFAULT_PATH_REMAINDER_IDENTIFIER,
 };
 
 pub struct RouteValue {
@@ -54,7 +54,7 @@ impl Proxy {
                         .strip_path_prefix
                         .then_some(m)
                         .and_then(|m| {
-                            m.params.get(PATH_REMAINDER_IDENTIFIER).map(|p| {
+                            m.params.get(DEFAULT_PATH_REMAINDER_IDENTIFIER).map(|p| {
                                 if !p.starts_with('/') {
                                     format!("/{p}")
                                 } else {
