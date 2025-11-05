@@ -1,3 +1,11 @@
 /target
 flamegraph.svg
 perf.data
+
+# Environment variables
+.env
+.env.local
+
+# Log files
+*.log
+*.log.*

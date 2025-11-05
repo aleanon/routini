@@ -28,8 +28,11 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = [
     "env-filter",
     "registry",
+    "json",
 ] }
 tracing-error = "0.2.1"
+tracing-appender = "0.2"
+
 arc-swap = "1.7.1"
 log = "0.4.28"
 futures = "0.3.31"
@@ -47,6 +50,7 @@ matchit = "0.9.0"
 regex = "1.12.2"
 color-eyre = "0.6.5"
 atomic_float = "1.1.0"
+jemallocator = "0.5.4"
 
 
 [dev-dependencies]
