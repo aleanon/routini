@@ -28,6 +28,7 @@ pingora = { git = "https://github.com/aleanon/pingora.git", branch = "stream-end
     "lb",
     "proxy",
     "cache",
+    "rustls",
 ] }
 async-trait = "0.1.89"
 pingora-runtime = "0.6.0"

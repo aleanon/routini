@@ -3,6 +3,7 @@ use std::{collections::BTreeSet, net::TcpListener, sync::LazyLock, thread, time:
 use color_eyre::eyre::{Result, eyre};
 use matchit::Router;
 use pingora::{
+    listeners::tls::TlsSettings,
     prelude::{HttpPeer, background_service},
     proxy::http_proxy_service,
     server::{Server, configuration::ServerConf},
@@ -17,11 +18,17 @@ use crate::{
     load_balancing::{Backend, Backends, discovery::Static, strategy::Adaptive},
     proxy::{Proxy, RouteValue},
     set_strategy_endpoint::SetStrategyEndpoint,
-    utils::constants::{
-        DEFAULT_HEALTH_CHECK_FREQUENCY, DEFAULT_MAX_ALGORITHM_ITERATIONS,
-        DEFAULT_WILDCARD_IDENTIFIER, PROMETHEUS_ENDPOINT_ADDRESS,
-    },
+    utils::constants::{DEFAULT_WILDCARD_IDENTIFIER, PROMETHEUS_ENDPOINT_ADDRESS},
 };
+
+/// TLS termination settings for the proxy's public listener.
+pub struct TlsConfig {
+    pub address: String,
+    pub cert_path: String,
+    pub key_path: String,
+    /// Advertise HTTP/2 (and HTTP/1.1) via ALPN. Off means HTTP/1.1 only.
+    pub enable_h2: bool,
+}
 
 const PATH_REGEX_PATTERN: &str = r"^/[^*]*\*?$";
 static PATH_REGEX: LazyLock<Regex> =
@@ -40,6 +47,8 @@ pub fn proxy_server(listener: TcpListener) -> ServerBuilder {
         routes: Vec::new(),
         set_strategy_endpoint: None,
         server_config: None,
+        tls: None,
+        prometheus_address: None,
     }
 }
 
@@ -63,9 +72,9 @@ impl Default for RouteConfig {
 pub struct Route {
     pub path: String,
     pub backends: Backends,
-    pub lb_strategy: Adaptive,
-    pub health_check_frequency: Option<Duration>,
-    pub max_iterations: usize,
+    /// Full tuning for the route's adaptive load balancer. `starting_strategy`,
+    /// `max_iterations` and `health_check_interval` are also adjustable via the builder methods.
+    pub lb_options: AdaptiveLbOpt,
     pub route_config: RouteConfig,
 }
 
@@ -74,6 +83,19 @@ impl Route {
         path: impl AsRef<str>,
         backends: impl IntoIterator<Item = A>,
         lb_strategy: Adaptive,
+    ) -> Result<Self> {
+        let lb_options = AdaptiveLbOpt {
+            starting_strategy: lb_strategy,
+            ..Default::default()
+        };
+        Self::with_options(path, backends, lb_options)
+    }
+
+    /// Construct a route with a fully specified [AdaptiveLbOpt], e.g. when building from config.
+    pub fn with_options<A: AsRef<str>>(
+        path: impl AsRef<str>,
+        backends: impl IntoIterator<Item = A>,
+        lb_options: AdaptiveLbOpt,
     ) -> Result<Self> {
         if !PATH_REGEX.is_match(path.as_ref()) {
             return Err(eyre!(
@@ -99,23 +121,21 @@ impl Route {
         Ok(Route {
             path,
             backends: Backends::new(Static::new(backends)),
-            lb_strategy,
-            health_check_frequency: Some(DEFAULT_HEALTH_CHECK_FREQUENCY),
-            max_iterations: DEFAULT_MAX_ALGORITHM_ITERATIONS,
+            lb_options,
             route_config: RouteConfig::default(),
         })
     }
 
-    /// Default: [DEFAULT_MAX_ALGORITHM_ITERATIONS]
+    /// Default: [DEFAULT_MAX_ALGORITHM_ITERATIONS](crate::utils::constants::DEFAULT_MAX_ALGORITHM_ITERATIONS)
     pub fn max_iterations(mut self, max_iterations: usize) -> Self {
-        self.max_iterations = max_iterations;
+        self.lb_options.max_iterations = max_iterations;
         self
     }
 
     /// Default: Some(Duration::from_secs(1))
     /// set to None to not run health check background service
     pub fn include_health_check(mut self, update_frequency: Option<Duration>) -> Self {
-        self.health_check_frequency = update_frequency;
+        self.lb_options.health_check_interval = update_frequency;
         self
     }
 
@@ -136,6 +156,8 @@ pub struct ServerBuilder {
     routes: Vec<Route>,
     set_strategy_endpoint: Option<String>,
     server_config: Option<ServerConf>,
+    tls: Option<TlsConfig>,
+    prometheus_address: Option<String>,
 }
 impl ServerBuilder {
     pub fn add_route(mut self, route: impl Into<Route>) -> Self {
@@ -153,20 +175,28 @@ impl ServerBuilder {
         self
     }
 
+    /// Terminate TLS on `address`, serving the same routes as the plain listener.
+    pub fn tls(mut self, tls: TlsConfig) -> Self {
+        self.tls = Some(tls);
+        self
+    }
+
+    /// Override the Prometheus metrics listen address.
+    /// Default: [PROMETHEUS_ENDPOINT_ADDRESS].
+    pub fn prometheus_address(mut self, addr: String) -> Self {
+        self.prometheus_address = Some(addr);
+        self
+    }
+
     pub fn build(self) -> Server {
         assert!(!self.routes.is_empty(), "requires at least one route");
         let mut server_config = self.server_config.unwrap_or(ServerConf::default());
-        server_config.upstream_keepalive_pool_size = 100000;
+        server_config.upstream_keepalive_pool_size = 200000;
         let mut server = Server::new_with_opt_and_conf(None, server_config);
 
         let mut routes = Router::new();
         for route in self.routes {
-            let lb_options = AdaptiveLbOpt {
-                max_iterations: route.max_iterations,
-                starting_strategy: route.lb_strategy,
-                health_check_interval: route.health_check_frequency,
-                ..Default::default()
-            };
+            let lb_options = route.lb_options;
 
             let decision_engine = AdaptiveDecisionEngine::new(&lb_options);
             let lb = AdaptiveLoadBalancer::from_backends(
@@ -203,10 +233,25 @@ impl ServerBuilder {
         let available_parallelism = thread::available_parallelism().map(Into::into).unwrap_or(1);
         router_service.threads = Some(available_parallelism);
         router_service.add_tcp(&self.address);
+
+        if let Some(tls) = self.tls {
+            let mut settings = TlsSettings::intermediate(&tls.cert_path, &tls.key_path)
+                .expect("Failed to load TLS certificate/key");
+            if tls.enable_h2 {
+                settings.enable_h2();
+            }
+            router_service.add_tls_with_settings(&tls.address, None, settings);
+            tracing::info!("TLS termination enabled on {}", tls.address);
+        }
+
         server.add_service(router_service);
 
         let mut prometheus = Service::prometheus_http_service();
-        prometheus.add_tcp(PROMETHEUS_ENDPOINT_ADDRESS);
+        let prometheus_address = self
+            .prometheus_address
+            .as_deref()
+            .unwrap_or(PROMETHEUS_ENDPOINT_ADDRESS);
+        prometheus.add_tcp(prometheus_address);
         server.add_service(prometheus);
 
         server.bootstrap();
@@ -217,6 +262,7 @@ impl ServerBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::constants::DEFAULT_MAX_ALGORITHM_ITERATIONS;
 
     #[tokio::test]
     async fn test_route_valid_simple_path() {
@@ -226,7 +272,7 @@ mod tests {
         assert_eq!(route.path, "/api");
 
         // Initialize backends from discovery
-        let strategy = route.lb_strategy.clone();
+        let strategy = route.lb_options.starting_strategy.clone();
         route.backends.update(&strategy, |_| {}).await.unwrap();
 
         assert_eq!(route.backends.get_backend().len(), 1);
@@ -307,7 +353,7 @@ mod tests {
         let route = route.unwrap();
 
         // Initialize backends from discovery
-        let strategy = route.lb_strategy.clone();
+        let strategy = route.lb_options.starting_strategy.clone();
         route.backends.update(&strategy, |_| {}).await.unwrap();
 
         assert_eq!(route.backends.get_backend().len(), 3);
@@ -323,8 +369,8 @@ mod tests {
                 strip_path_prefix: false,
             });
 
-        assert_eq!(route.max_iterations, 20);
-        assert_eq!(route.health_check_frequency, None);
+        assert_eq!(route.lb_options.max_iterations, 20);
+        assert_eq!(route.lb_options.health_check_interval, None);
         assert_eq!(route.route_config.strip_path_prefix, false);
     }
 
@@ -332,8 +378,14 @@ mod tests {
     fn test_route_default_values() {
         let route = Route::new("/api", vec!["127.0.0.1:8080"], Adaptive::default()).unwrap();
 
-        assert_eq!(route.max_iterations, DEFAULT_MAX_ALGORITHM_ITERATIONS);
-        assert_eq!(route.health_check_frequency, Some(Duration::from_secs(1)));
+        assert_eq!(
+            route.lb_options.max_iterations,
+            DEFAULT_MAX_ALGORITHM_ITERATIONS
+        );
+        assert_eq!(
+            route.lb_options.health_check_interval,
+            Some(Duration::from_secs(1))
+        );
         assert_eq!(route.route_config.strip_path_prefix, true);
     }
 
