@@ -1,5 +1,6 @@
 use http::StatusCode;
 use matchit::Router;
+use quick_cache::sync::Cache;
 use std::{sync::Arc, time::Instant};
 
 use pingora::{
@@ -14,7 +15,7 @@ use crate::{
     adaptive_loadbalancer::{AdaptiveLoadBalancer, decision_engine::AdaptiveDecisionEngine},
     load_balancing::{Backend, Metrics},
     server_builder::RouteConfig,
-    utils::constants::DEFAULT_PATH_REMAINDER_IDENTIFIER,
+    utils::constants::{DEFAULT_PATH_CACHE_CAPACITY, DEFAULT_PATH_REMAINDER_IDENTIFIER},
 };
 
 pub struct RouteValue {
@@ -22,16 +23,57 @@ pub struct RouteValue {
     pub route_config: RouteConfig,
 }
 
+/// The pre-computed result of routing a concrete request path, stored in the path cache.
+///
+/// Both fields are cheap to clone: `lb` is an `Arc` (the route table is immutable after build,
+/// so the same balancer is shared) and `stripped_path` is computed once and reused, removing the
+/// per-request `format!`/`to_string` allocation from the hot path.
+pub struct CachedRoute {
+    pub lb: Arc<AdaptiveLoadBalancer<AdaptiveDecisionEngine>>,
+    /// The rewritten upstream path when `strip_path_prefix` is enabled, already encoded as bytes
+    /// ready for `set_raw_path`. `None` when the path is forwarded unchanged.
+    pub stripped_path: Option<Box<[u8]>>,
+}
+
 #[derive(Clone)]
 pub struct Proxy {
     routes: Arc<Router<RouteValue>>,
+    /// Bounded concurrent cache mapping a concrete request path to its resolved route. The first
+    /// request to a path does the matchit lookup and stripping; subsequent requests reuse the
+    /// cached `Arc<CachedRoute>` with no allocation. Routes never change after build, so entries
+    /// never need invalidation — eviction only bounds memory.
+    cache: Arc<Cache<Box<str>, Arc<CachedRoute>>>,
 }
 
 impl Proxy {
     pub fn new(routes: Router<RouteValue>) -> Self {
+        Self::with_cache_capacity(routes, DEFAULT_PATH_CACHE_CAPACITY)
+    }
+
+    pub fn with_cache_capacity(routes: Router<RouteValue>, capacity: usize) -> Self {
         Proxy {
             routes: Arc::new(routes),
+            cache: Arc::new(Cache::new(capacity)),
         }
+    }
+
+    /// Resolve a concrete request path to its (cached) route.
+    ///
+    /// On a cache hit this is a single concurrent-map lookup plus an `Arc` clone. On a miss it
+    /// performs the matchit lookup and computes the stripped path once, then caches the result.
+    pub fn resolve(&self, path: &str) -> Result<Arc<CachedRoute>> {
+        if let Some(cached) = self.cache.get(path) {
+            return Ok(cached);
+        }
+
+        let (route_value, stripped_path) = self.route(path)?;
+        let cached = Arc::new(CachedRoute {
+            lb: route_value.lb.clone(),
+            stripped_path: stripped_path.map(|p| p.into_bytes().into_boxed_slice()),
+        });
+
+        self.cache.insert(path.into(), cached.clone());
+        Ok(cached)
     }
 
     pub fn route(&self, path: &str) -> Result<(&RouteValue, Option<String>)> {
@@ -92,9 +134,9 @@ impl ProxyHttp for Proxy {
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
         let path = session.req_header().uri.path();
-        let (route_value, stripped_path) = self.route(path)?;
+        let route = self.resolve(path)?;
 
-        let backend = route_value.lb.select(&[]).ok_or(Error {
+        let backend = route.lb.select(&[]).ok_or(Error {
             context: Some(ImmutStr::Static("No healthy backends available")),
             cause: None,
             etype: ErrorType::InternalError,
@@ -102,8 +144,8 @@ impl ProxyHttp for Proxy {
             retry: RetryType::Decided(true),
         })?;
 
-        if let Some(path) = stripped_path {
-            session.req_header_mut().set_raw_path(path.as_bytes())?;
+        if let Some(stripped_path) = &route.stripped_path {
+            session.req_header_mut().set_raw_path(stripped_path)?;
         }
 
         let peer = match backend.ext.get::<HttpPeer>() {
@@ -115,7 +157,7 @@ impl ProxyHttp for Proxy {
         };
 
         ctx.backend = Some(backend);
-        ctx.lb = Some(route_value.lb.clone());
+        ctx.lb = Some(route.lb.clone());
 
         Ok(Box::new(peer))
     }
@@ -362,6 +404,35 @@ mod tests {
         let result = proxy.route("/");
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_resolve_caches_and_strips() {
+        let mut router = Router::new();
+        router
+            .insert("/auth/{*rest}", create_test_route_value(true))
+            .expect("Failed to insert route");
+
+        let proxy = Proxy::new(router);
+
+        let first = proxy.resolve("/auth/login").expect("should resolve");
+        assert_eq!(first.stripped_path.as_deref(), Some(b"/login".as_slice()));
+
+        // Second resolve of the same path must return the very same cached Arc.
+        let second = proxy.resolve("/auth/login").expect("should resolve");
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn test_resolve_no_strip_has_no_path() {
+        let mut router = Router::new();
+        router
+            .insert("/api", create_test_route_value(false))
+            .expect("Failed to insert route");
+
+        let proxy = Proxy::new(router);
+        let resolved = proxy.resolve("/api").expect("should resolve");
+        assert!(resolved.stripped_path.is_none());
     }
 
     #[test]

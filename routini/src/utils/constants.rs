@@ -8,6 +8,11 @@ pub const PROMETHEUS_ENDPOINT_ADDRESS: &str = "0.0.0.0:9090";
 // Router defaults
 pub const DEFAULT_PATH_REMAINDER_IDENTIFIER: &str = "rest";
 pub const DEFAULT_WILDCARD_IDENTIFIER: &str = "{*rest}";
+/// Maximum number of distinct request paths whose routing result (matched backend pool +
+/// pre-computed stripped path) is cached. Bounded to avoid unbounded growth from path
+/// parameters (e.g. `/api/users/{id}`). Evicted entries simply pay the matchit lookup +
+/// stripping cost again on their next request.
+pub const DEFAULT_PATH_CACHE_CAPACITY: usize = 8192;
 
 // Load balancer defaults
 pub const DEFAULT_MAX_ALGORITHM_ITERATIONS: usize = 256;
