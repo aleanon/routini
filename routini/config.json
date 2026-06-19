@@ -1,0 +1,62 @@
+{
+  "server": {
+    "prometheus_address": "0.0.0.0:9000"
+  },
+  "proxy": {
+    "listener": 3500,
+    "router": [
+      {
+        "path": "/api/*",
+        "strip_prefix": true,
+        "load_balancer": {
+          "strategy": "RoundRobin",
+          "adaptive_lb_opt": {},
+          "max_iterations": 100,
+          "health_check_interval_secs": 1,
+          "upstreams": [
+            {
+              "address": "127.0.0.1:4001",
+              "weight": 1
+            },
+            {
+              "address": "127.0.0.1:4002",
+              "weight": 1
+            },
+            {
+              "address": "127.0.0.1:4003",
+              "weight": 1
+            },
+            {
+              "address": "127.0.0.1:4004",
+              "weight": 1
+            },
+            {
+              "address": "127.0.0.1:4005",
+              "weight": 1
+            },
+            {
+              "address": "127.0.0.1:4006",
+              "weight": 1
+            },
+            {
+              "address": "127.0.0.1:4007",
+              "weight": 1
+            },
+            {
+              "address": "127.0.0.1:4008",
+              "weight": 1
+            },
+            {
+              "address": "127.0.0.1:4009",
+              "weight": 1
+            },
+            {
+              "address": "127.0.0.1:4010",
+              "weight": 1
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

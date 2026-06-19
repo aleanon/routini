@@ -1,8 +1,8 @@
-use color_eyre::eyre::Result;
+use color_eyre::eyre::{Result, eyre};
 use routini::{
-    load_balancing::strategy::Adaptive,
-    server_builder::{Route, proxy_server},
+    server_builder::proxy_server,
     utils::{
+        config_loader::load_config,
         constants::{
             DEFAULT_LOG_JSON, DEFAULT_LOG_LEVEL_FILTER, DEFAULT_MAX_LOG_AGE_DAYS,
             SET_STRATEGY_ENDPOINT_ADDRESS,
@@ -39,18 +39,35 @@ fn main() -> Result<()> {
     init_tracing_with_config(log_config).expect("Failed to set up tracing");
     color_eyre::install().expect("Failed to install color_eyre");
 
-    let listener = TcpListener::bind("127.0.0.1:3500")?;
-    let mut backends = Vec::new();
+    let config = load_config()?;
+    tracing::info!("Loaded configuration: {} route(s)", config.proxy.router.len());
 
-    for i in 1..=40 {
-        backends.push(format!("127.0.0.1:40{:02}", i));
+    let listener = TcpListener::bind(config.listen_address())?;
+
+    let routes = config.routes()?;
+    if routes.is_empty() {
+        return Err(eyre!("Configuration must define at least one route"));
     }
 
-    let route_two = Route::new("/api/*", backends, Adaptive::RoundRobin)?;
+    let mut builder = proxy_server(listener);
+    for route in routes {
+        builder = builder.add_route(route);
+    }
 
-    proxy_server(listener)
-        .add_route(route_two)
-        .set_strategy_endpoint(SET_STRATEGY_ENDPOINT_ADDRESS.to_string())
-        .build()
-        .run_forever();
+    let strategy_endpoint = config
+        .server
+        .set_strategy_endpoint
+        .clone()
+        .unwrap_or_else(|| SET_STRATEGY_ENDPOINT_ADDRESS.to_string());
+    builder = builder.set_strategy_endpoint(strategy_endpoint);
+
+    if let Some(prometheus_address) = config.server.prometheus_address.clone() {
+        builder = builder.prometheus_address(prometheus_address);
+    }
+
+    if let Some(tls) = &config.proxy.tls {
+        builder = builder.tls(tls.to_builder_tls());
+    }
+
+    builder.build().run_forever();
 }

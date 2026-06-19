@@ -1,4 +1,5 @@
 pub mod adaptive_loadbalancer;
+pub mod config;
 pub mod load_balancing;
 pub mod proxy;
 pub mod server_builder;
