@@ -4,7 +4,7 @@ use crate::{
     load_balancing::strategy::Adaptive,
     utils::constants::{
         DEFAULT_CONNECTIONS_DIV_RATIO, DEFAULT_EVALUATE_STRATEGY_FREQUENCY,
-        DEFAULT_HEALTH_CHECK_FREQUENCY, DEFAULT_LATENCY_DIV_RATIO,
+        DEFAULT_HEALTH_CHECK_FREQUENCY, DEFAULT_HYSTERESIS_EXIT_FACTOR, DEFAULT_LATENCY_DIV_RATIO,
         DEFAULT_MAX_ALGORITHM_ITERATIONS, DEFAULT_MIN_NR_OF_CONNECTIONS, DEFAULT_SMOOTHING_FACTOR,
     },
 };
@@ -19,6 +19,8 @@ pub struct AdaptiveLbOpt {
     pub max_iterations: usize,
     pub health_check_interval: Option<Duration>,
     pub min_nr_of_connections: usize,
+    /// Fraction of the enter thresholds used as exit thresholds (hysteresis).
+    pub hysteresis_exit_factor: f32,
 }
 
 impl Default for AdaptiveLbOpt {
@@ -32,6 +34,7 @@ impl Default for AdaptiveLbOpt {
             max_iterations: DEFAULT_MAX_ALGORITHM_ITERATIONS,
             health_check_interval: Some(DEFAULT_HEALTH_CHECK_FREQUENCY),
             min_nr_of_connections: DEFAULT_MIN_NR_OF_CONNECTIONS,
+            hysteresis_exit_factor: DEFAULT_HYSTERESIS_EXIT_FACTOR,
         }
     }
 }
@@ -45,6 +48,7 @@ pub struct AdaptiveLbConfig {
     pub max_iterations: usize,
     pub health_check_interval: Option<Duration>,
     pub min_nr_of_connections: usize,
+    pub hysteresis_exit_factor: f32,
 }
 
 impl From<AdaptiveLbOpt> for AdaptiveLbConfig {
@@ -57,6 +61,7 @@ impl From<AdaptiveLbOpt> for AdaptiveLbConfig {
             max_iterations: value.max_iterations,
             health_check_interval: value.health_check_interval,
             min_nr_of_connections: value.min_nr_of_connections,
+            hysteresis_exit_factor: value.hysteresis_exit_factor,
         }
     }
 }

@@ -22,6 +22,11 @@ pub const DEFAULT_LATENCY_DIV_RATIO: f32 = 2.0;
 pub const DEFAULT_EVALUATE_STRATEGY_FREQUENCY: Duration = Duration::from_secs(5);
 pub const DEFAULT_HEALTH_CHECK_FREQUENCY: Duration = Duration::from_secs(1);
 pub const DEFAULT_MIN_NR_OF_CONNECTIONS: usize = 1000;
+/// Fraction of an enter threshold used as the exit threshold, giving the adaptive
+/// engine hysteresis so it does not flap between strategies on every evaluation.
+/// e.g. with a latency enter ratio of 2.0 and factor 0.75, the engine only leaves
+/// FastestServer once the ratio drops below 1.5.
+pub const DEFAULT_HYSTERESIS_EXIT_FACTOR: f32 = 0.75;
 
 // Logging
 pub const DEFAULT_LOG_LEVEL_FILTER: &str = "info,routini=debug,pingora=info";
