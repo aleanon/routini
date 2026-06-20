@@ -14,6 +14,8 @@ use http::{HeaderName, HeaderValue, header};
 use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::prelude::HttpPeer;
 use pingora::protocols::l4::socket::SocketAddr;
+use pingora_limits::inflight::{Guard, Inflight};
+use pingora_limits::rate::Rate;
 
 use crate::{
     adaptive_loadbalancer::{AdaptiveLoadBalancer, decision_engine::AdaptiveDecisionEngine},
@@ -56,6 +58,50 @@ impl Default for PassiveHealthConfig {
             max_fails: 3,
             fail_timeout: Duration::from_secs(10),
         }
+    }
+}
+
+/// Per-client-IP request-rate limiter (nginx `limit_req`). Backed by a 1-second sliding window.
+pub struct RateLimiter {
+    rate: Rate,
+    max_rps: f64,
+}
+
+impl RateLimiter {
+    pub fn new(max_rps: f64) -> Self {
+        Self {
+            rate: Rate::new(Duration::from_secs(1)),
+            max_rps,
+        }
+    }
+
+    /// Record a request from `key` and return `true` if it is over the limit (reject).
+    pub fn over_limit(&self, key: &IpAddr) -> bool {
+        self.rate.observe(key, 1);
+        self.rate.rate(key) > self.max_rps
+    }
+}
+
+/// Per-client-IP concurrent-request limiter (nginx `limit_conn`).
+pub struct ConnLimiter {
+    inflight: Inflight,
+    max: isize,
+}
+
+impl ConnLimiter {
+    pub fn new(max: usize) -> Self {
+        Self {
+            inflight: Inflight::new(),
+            max: max as isize,
+        }
+    }
+
+    /// Try to reserve a concurrency slot for `key`. On success returns a [`Guard`] that must be
+    /// held for the request's lifetime (it decrements the count on drop). On `Err` the request is
+    /// over the limit (the transient increment is already rolled back by dropping the guard).
+    pub fn acquire(&self, key: &IpAddr) -> Result<Guard, ()> {
+        let (guard, count) = self.inflight.incr(*key, 1);
+        if count > self.max { Err(()) } else { Ok(guard) }
     }
 }
 
@@ -306,6 +352,10 @@ pub struct RouteConfig {
     pub upstream_tls: UpstreamTls,
     /// `Strict-Transport-Security` header value to add on TLS responses (nginx HSTS `add_header`).
     pub hsts: Option<String>,
+    /// Max requests/sec per client IP (nginx `limit_req`). `None` = unlimited.
+    pub rate_limit_rps: Option<f64>,
+    /// Max concurrent requests per client IP (nginx `limit_conn`). `None` = unlimited.
+    pub max_connections: Option<usize>,
 }
 
 impl Default for RouteConfig {
@@ -319,21 +369,34 @@ impl Default for RouteConfig {
             max_body_size: None,
             upstream_tls: UpstreamTls::default(),
             hsts: None,
+            rate_limit_rps: None,
+            max_connections: None,
         }
     }
 }
 
-/// A route's config bundled with its load balancer and passive-health state. Shared via `Arc`.
+/// A route's config bundled with its load balancer and shared runtime state (passive health,
+/// rate/connection limiters). Shared via `Arc` and never reconstructed after build.
 pub struct RouteRuntime {
     pub lb: SharedLb,
     pub config: RouteConfig,
     pub health: PassiveHealth,
+    pub rate_limiter: Option<RateLimiter>,
+    pub conn_limiter: Option<ConnLimiter>,
 }
 
 impl RouteRuntime {
     pub fn new(lb: SharedLb, config: RouteConfig) -> Self {
         let health = PassiveHealth::new(config.passive_health);
-        Self { lb, config, health }
+        let rate_limiter = config.rate_limit_rps.map(RateLimiter::new);
+        let conn_limiter = config.max_connections.map(ConnLimiter::new);
+        Self {
+            lb,
+            config,
+            health,
+            rate_limiter,
+            conn_limiter,
+        }
     }
 }
 
@@ -441,6 +504,19 @@ mod tests {
         let expired = ph.take_expired(later);
         assert_eq!(expired.len(), 1);
         assert_eq!(expired[0].addr, backend.addr);
+    }
+
+    #[test]
+    fn conn_limiter_caps_concurrency_and_frees_on_drop() {
+        let cl = ConnLimiter::new(2);
+        let ip: IpAddr = "1.2.3.4".parse().unwrap();
+
+        let g1 = cl.acquire(&ip).expect("1st under limit");
+        let _g2 = cl.acquire(&ip).expect("2nd under limit");
+        assert!(cl.acquire(&ip).is_err(), "3rd is over the limit of 2");
+
+        drop(g1); // free a slot
+        assert!(cl.acquire(&ip).is_ok(), "slot reusable after a guard drops");
     }
 
     #[test]

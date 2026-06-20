@@ -2169,6 +2169,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pingora-limits"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b93c897e8cc04ff0d077ee2a655142910618222aeefc83f7f99f5b9fc59ccb13"
+dependencies = [
+ "ahash",
+]
+
+[[package]]
 name = "pingora-load-balancing"
 version = "0.6.0"
 source = "git+https://github.com/aleanon/pingora.git?branch=stream-end-hook#571ed6f11b0ba94e1db55fa4ce733a50580f27ca"
@@ -2668,6 +2677,7 @@ dependencies = [
  "matchit 0.9.0",
  "pingora",
  "pingora-ketama 0.6.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "pingora-limits",
  "pingora-runtime 0.6.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "quick_cache",
  "rand 0.9.2",

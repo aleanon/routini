@@ -131,6 +131,10 @@ pub struct RouteEntry {
     pub upstream_tls: UpstreamTlsInput,
     /// `Strict-Transport-Security` value to add on TLS responses.
     pub hsts: Option<String>,
+    /// Max requests/sec per client IP (nginx `limit_req`).
+    pub rate_limit_rps: Option<f64>,
+    /// Max concurrent requests per client IP (nginx `limit_conn`).
+    pub max_connections: Option<usize>,
     pub load_balancer: LoadBalancerConfig,
 }
 
@@ -152,6 +156,8 @@ impl RouteEntry {
             max_body_size: self.max_body_size,
             upstream_tls: self.upstream_tls.to_upstream_tls(),
             hsts: self.hsts.clone(),
+            rate_limit_rps: self.rate_limit_rps,
+            max_connections: self.max_connections,
         };
 
         let mut route =

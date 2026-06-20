@@ -32,6 +32,7 @@ pingora = { git = "https://github.com/aleanon/pingora.git", branch = "stream-end
 ] }
 async-trait = "0.1.89"
 pingora-runtime = "0.6.0"
+pingora-limits = "0.6.0"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = [
     "env-filter",

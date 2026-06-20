@@ -230,6 +230,9 @@ pub struct ConnectionCTX {
     request_start: Instant,
     /// Original request path (captured before prefix stripping) for the access log.
     orig_path: Option<Box<str>>,
+    /// Held for the request's lifetime to keep the per-IP concurrency count accurate; the count is
+    /// decremented when this guard drops at the end of the request.
+    conn_guard: Option<pingora_limits::inflight::Guard>,
 }
 
 #[async_trait::async_trait]
@@ -245,6 +248,7 @@ impl ProxyHttp for Proxy {
             body_seen: 0,
             request_start: Instant::now(),
             orig_path: None,
+            conn_guard: None,
         }
     }
 
@@ -303,6 +307,28 @@ impl ProxyHttp for Proxy {
                 return Ok(true);
             }
         };
+
+        // Per-client-IP rate and concurrency limits (nginx limit_req / limit_conn).
+        let client = client_ip(session);
+        if let (Some(limiter), Some(ip)) = (&cached.runtime.rate_limiter, client) {
+            if limiter.over_limit(&ip) {
+                session
+                    .respond_error(StatusCode::TOO_MANY_REQUESTS.as_u16())
+                    .await?;
+                return Ok(true);
+            }
+        }
+        if let (Some(limiter), Some(ip)) = (&cached.runtime.conn_limiter, client) {
+            match limiter.acquire(&ip) {
+                Ok(guard) => ctx.conn_guard = Some(guard),
+                Err(()) => {
+                    session
+                        .respond_error(StatusCode::TOO_MANY_REQUESTS.as_u16())
+                        .await?;
+                    return Ok(true);
+                }
+            }
+        }
 
         // Reject oversized bodies early via Content-Length (streaming bodies are guarded in
         // `request_body_filter`).
