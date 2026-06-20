@@ -61,6 +61,16 @@ impl Default for PassiveHealthConfig {
     }
 }
 
+/// An immediate response a route can return without proxying (nginx `return` / `rewrite ... redirect`).
+#[derive(Debug, Clone)]
+pub enum RouteAction {
+    /// Redirect to `location`. The template may contain `$uri` (request path) and `$request_uri`
+    /// (path + query), substituted per request.
+    Redirect { status: u16, location: String },
+    /// Respond immediately with `status` and an optional body.
+    Return { status: u16, body: Option<String> },
+}
+
 /// Per-client-IP request-rate limiter (nginx `limit_req`). Backed by a 1-second sliding window.
 pub struct RateLimiter {
     rate: Rate,
@@ -356,6 +366,8 @@ pub struct RouteConfig {
     pub rate_limit_rps: Option<f64>,
     /// Max concurrent requests per client IP (nginx `limit_conn`). `None` = unlimited.
     pub max_connections: Option<usize>,
+    /// If set, the route short-circuits with this response instead of proxying (redirect/return).
+    pub action: Option<RouteAction>,
 }
 
 impl Default for RouteConfig {
@@ -371,6 +383,7 @@ impl Default for RouteConfig {
             hsts: None,
             rate_limit_rps: None,
             max_connections: None,
+            action: None,
         }
     }
 }

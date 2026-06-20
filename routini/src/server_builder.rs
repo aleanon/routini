@@ -76,6 +76,9 @@ pub struct Route {
     pub route_config: RouteConfig,
     /// Optional virtual host this route belongs to (nginx `server_name`). `None` = default server.
     pub host: Option<String>,
+    /// When true, `path` is a regex location matched against the full request path (default server
+    /// only), tried after matchit routes (nginx `location ~ <regex>`).
+    pub is_regex: bool,
 }
 
 impl Route {
@@ -117,7 +120,41 @@ impl Route {
             ));
         }
         let path = path.as_ref().replacen("*", DEFAULT_WILDCARD_IDENTIFIER, 1);
+        let backends = Self::build_backend_set(backends)?;
 
+        Ok(Route {
+            path,
+            backends: Backends::new(Static::new(backends)),
+            lb_options,
+            route_config: RouteConfig::default(),
+            host: None,
+            is_regex: false,
+        })
+    }
+
+    /// Construct a regex location route from weighted upstreams (nginx `location ~ <pattern>`).
+    /// The `pattern` is matched against the full request path; the path is forwarded unchanged.
+    pub fn regex(
+        pattern: impl AsRef<str>,
+        backends: impl IntoIterator<Item = (String, usize)>,
+        lb_options: AdaptiveLbOpt,
+    ) -> Result<Self> {
+        Regex::new(pattern.as_ref()).map_err(|e| eyre!("Invalid regex pattern: {e}"))?;
+        let backends = Self::build_backend_set(backends)?;
+
+        Ok(Route {
+            path: pattern.as_ref().to_string(),
+            backends: Backends::new(Static::new(backends)),
+            lb_options,
+            route_config: RouteConfig::default(),
+            host: None,
+            is_regex: true,
+        })
+    }
+
+    fn build_backend_set(
+        backends: impl IntoIterator<Item = (String, usize)>,
+    ) -> Result<BTreeSet<Backend>> {
         let backends = backends
             .into_iter()
             .map(|(addr, weight)| {
@@ -132,14 +169,7 @@ impl Route {
         if backends.is_empty() {
             return Err(eyre!("Must provide at least one backend"));
         }
-
-        Ok(Route {
-            path,
-            backends: Backends::new(Static::new(backends)),
-            lb_options,
-            route_config: RouteConfig::default(),
-            host: None,
-        })
+        Ok(backends)
     }
 
     /// Restrict this route to a named virtual host (nginx `server_name`).
@@ -231,6 +261,7 @@ impl ServerBuilder {
         let mut server = Server::new_with_opt_and_conf(None, server_config);
 
         let mut default_router = Router::new();
+        let mut default_regex: Vec<(Regex, RouteValue)> = Vec::new();
         let mut vhost_routers: HashMap<String, Router<RouteValue>> = HashMap::new();
         for route in self.routes {
             let lb_options = route.lb_options;
@@ -252,6 +283,13 @@ impl ServerBuilder {
                 runtime: Arc::new(RouteRuntime::new(task, route.route_config)),
             };
 
+            if route.is_regex {
+                tracing::info!("Adding regex route: {}", route.path);
+                let re = Regex::new(&route.path).expect("regex validated at construction");
+                default_regex.push((re, route_value));
+                continue;
+            }
+
             match route.host {
                 Some(host) => {
                     tracing::info!("Adding route: {} (host: {host})", route.path);
@@ -269,8 +307,12 @@ impl ServerBuilder {
                 }
             }
         }
-        let mut router =
-            Proxy::with_vhosts(default_router, vhost_routers, DEFAULT_PATH_CACHE_CAPACITY);
+        let mut router = Proxy::with_regex_routes(
+            default_router,
+            default_regex,
+            vhost_routers,
+            DEFAULT_PATH_CACHE_CAPACITY,
+        );
         router.set_access_log(self.access_log);
         router.set_https_redirect(self.https_redirect);
 

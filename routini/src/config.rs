@@ -13,11 +13,15 @@ use crate::{
     adaptive_loadbalancer::options::AdaptiveLbOpt,
     load_balancing::strategy::Adaptive,
     route::{
-        HeaderRules, HostRewrite, PassiveHealthConfig, RetryConfig, RouteConfig, TimeoutConfig,
-        UpstreamTls,
+        HeaderRules, HostRewrite, PassiveHealthConfig, RetryConfig, RouteAction, RouteConfig,
+        TimeoutConfig, UpstreamTls,
     },
     server_builder::{Route, TlsConfig as BuilderTlsConfig},
 };
+
+fn default_redirect_status() -> u16 {
+    301
+}
 
 fn parse_header_pairs(map: &HashMap<String, String>) -> Result<Vec<(HeaderName, HeaderValue)>> {
     map.iter()
@@ -115,6 +119,11 @@ pub struct RouteEntry {
     pub path: String,
     /// Optional virtual host (nginx `server_name`); routes with no host form the default server.
     pub host: Option<String>,
+    /// Treat `path` as a regex location (default-server only) instead of a matchit prefix.
+    #[serde(default)]
+    pub regex: bool,
+    /// Short-circuit response (redirect/return) instead of proxying.
+    pub action: Option<ActionInput>,
     #[serde(default = "default_true")]
     pub strip_prefix: bool,
     #[serde(default)]
@@ -140,12 +149,20 @@ pub struct RouteEntry {
 
 impl RouteEntry {
     fn to_route(&self) -> Result<Route> {
-        let upstreams = self
+        let mut upstreams = self
             .load_balancer
             .upstreams
             .iter()
             .map(|u| (u.address.clone(), u.weight))
             .collect::<Vec<_>>();
+
+        let action = self.action.as_ref().map(ActionInput::to_action);
+
+        // Redirect/return routes never proxy, but Route requires at least one backend; inject an
+        // unused placeholder so such routes can be declared without an upstream.
+        if upstreams.is_empty() && action.is_some() {
+            upstreams.push(("127.0.0.1:1".to_string(), 1));
+        }
 
         let config = RouteConfig {
             strip_path_prefix: self.strip_prefix,
@@ -158,15 +175,51 @@ impl RouteEntry {
             hsts: self.hsts.clone(),
             rate_limit_rps: self.rate_limit_rps,
             max_connections: self.max_connections,
+            action,
         };
 
-        let mut route =
-            Route::with_weighted_backends(&self.path, upstreams, self.load_balancer.to_lb_opt())?
-                .route_config(config);
+        let lb_opt = self.load_balancer.to_lb_opt();
+        let built = if self.regex {
+            Route::regex(&self.path, upstreams, lb_opt)?
+        } else {
+            Route::with_weighted_backends(&self.path, upstreams, lb_opt)?
+        };
+        let mut route = built.route_config(config);
         if let Some(host) = &self.host {
             route = route.host(host.clone());
         }
         Ok(route)
+    }
+}
+
+/// Short-circuit response config (nginx `return` / `rewrite ... redirect`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionInput {
+    Redirect {
+        #[serde(default = "default_redirect_status")]
+        status: u16,
+        location: String,
+    },
+    Return {
+        status: u16,
+        #[serde(default)]
+        body: Option<String>,
+    },
+}
+
+impl ActionInput {
+    fn to_action(&self) -> RouteAction {
+        match self {
+            ActionInput::Redirect { status, location } => RouteAction::Redirect {
+                status: *status,
+                location: location.clone(),
+            },
+            ActionInput::Return { status, body } => RouteAction::Return {
+                status: *status,
+                body: body.clone(),
+            },
+        }
     }
 }
 

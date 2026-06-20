@@ -2,6 +2,7 @@ use bytes::Bytes;
 use http::StatusCode;
 use matchit::Router;
 use quick_cache::sync::Cache;
+use regex::Regex;
 use std::{net::IpAddr, sync::Arc, time::Instant};
 
 use pingora::{
@@ -14,7 +15,7 @@ use pingora::{
 
 use crate::{
     load_balancing::{Backend, Metrics},
-    route::RouteRuntime,
+    route::{RouteAction, RouteRuntime},
     utils::constants::{DEFAULT_PATH_CACHE_CAPACITY, DEFAULT_PATH_REMAINDER_IDENTIFIER},
 };
 
@@ -50,6 +51,20 @@ fn client_is_tls(session: &Session) -> bool {
         .unwrap_or(false)
 }
 
+/// Expand a redirect `Location` template, substituting `$request_uri` (path + query) and `$uri`
+/// (path). Returns the template unchanged when it contains no `$` placeholder.
+fn redirect_location(template: &str, session: &Session) -> String {
+    if !template.contains('$') {
+        return template.to_string();
+    }
+    let uri = &session.req_header().uri;
+    let path = uri.path();
+    let request_uri = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or(path);
+    template
+        .replace("$request_uri", request_uri)
+        .replace("$uri", path)
+}
+
 /// Parse the request's `Content-Length`, if present and valid.
 fn content_length(session: &Session) -> Option<usize> {
     session
@@ -80,6 +95,9 @@ pub struct Proxy {
     /// Name-based virtual hosts, keyed by lowercased host. Empty in the common single-host case,
     /// in which routing skips host handling entirely and behaves exactly like path-only routing.
     vhosts: Arc<std::collections::HashMap<String, VHost>>,
+    /// Regex location routes for the default server, tried in order when matchit finds no match
+    /// (nginx `location ~ <regex>`). These forward the full path (no prefix stripping).
+    default_regex: Arc<Vec<(Regex, RouteValue)>>,
     /// Emit a structured access-log line per request (nginx `access_log on/off`).
     access_log: bool,
     /// Redirect plain-HTTP requests to `https://` (nginx `return 301 https://...`).
@@ -101,6 +119,16 @@ impl Proxy {
         vhosts: std::collections::HashMap<String, Router<RouteValue>>,
         capacity: usize,
     ) -> Self {
+        Self::with_regex_routes(default_router, Vec::new(), vhosts, capacity)
+    }
+
+    /// Build a proxy with default matchit routes, default regex routes, and vhost routers.
+    pub fn with_regex_routes(
+        default_router: Router<RouteValue>,
+        default_regex: Vec<(Regex, RouteValue)>,
+        vhosts: std::collections::HashMap<String, Router<RouteValue>>,
+        capacity: usize,
+    ) -> Self {
         let vhosts = vhosts
             .into_iter()
             .map(|(host, router)| {
@@ -118,6 +146,7 @@ impl Proxy {
             default_router: Arc::new(default_router),
             default_cache: Arc::new(Cache::new(capacity)),
             vhosts: Arc::new(vhosts),
+            default_regex: Arc::new(default_regex),
             access_log: true,
             https_redirect: false,
         }
@@ -148,15 +177,21 @@ impl Proxy {
                     .unwrap_or(host)
                     .to_ascii_lowercase();
                 if let Some(vhost) = self.vhosts.get(&key) {
-                    return Self::resolve_in(&vhost.router, &vhost.cache, path);
+                    return Self::resolve_in(&vhost.router, &[], &vhost.cache, path);
                 }
             }
         }
-        Self::resolve_in(&self.default_router, &self.default_cache, path)
+        Self::resolve_in(
+            &self.default_router,
+            &self.default_regex,
+            &self.default_cache,
+            path,
+        )
     }
 
     fn resolve_in(
         router: &Router<RouteValue>,
+        regex: &[(Regex, RouteValue)],
         cache: &Cache<Box<str>, Arc<CachedRoute>>,
         path: &str,
     ) -> Result<Arc<CachedRoute>> {
@@ -164,11 +199,20 @@ impl Proxy {
             return Ok(cached);
         }
 
-        let (route_value, stripped_path) = Self::route_in(router, path)?;
-        let cached = Arc::new(CachedRoute {
-            runtime: route_value.runtime.clone(),
-            stripped_path: stripped_path.map(|p| p.into_bytes().into_boxed_slice()),
-        });
+        let cached = match Self::route_in(router, path) {
+            Ok((route_value, stripped_path)) => Arc::new(CachedRoute {
+                runtime: route_value.runtime.clone(),
+                stripped_path: stripped_path.map(|p| p.into_bytes().into_boxed_slice()),
+            }),
+            // matchit miss: fall back to regex locations (first match wins, full path forwarded).
+            Err(not_found) => match regex.iter().find(|(re, _)| re.is_match(path)) {
+                Some((_, route_value)) => Arc::new(CachedRoute {
+                    runtime: route_value.runtime.clone(),
+                    stripped_path: None,
+                }),
+                None => return Err(not_found),
+            },
+        };
 
         cache.insert(path.into(), cached.clone());
         Ok(cached)
@@ -307,6 +351,35 @@ impl ProxyHttp for Proxy {
                 return Ok(true);
             }
         };
+
+        // Redirect / return actions short-circuit without proxying.
+        if let Some(action) = &cached.runtime.config.action {
+            match action {
+                RouteAction::Redirect { status, location } => {
+                    let location = redirect_location(location, session);
+                    let mut resp = ResponseHeader::build(*status, None)?;
+                    resp.insert_header(http::header::LOCATION, location)?;
+                    resp.insert_header(http::header::CONTENT_LENGTH, "0")?;
+                    session.write_response_header(Box::new(resp), true).await?;
+                }
+                RouteAction::Return {
+                    status,
+                    body: Some(body),
+                } => {
+                    let bytes = Bytes::copy_from_slice(body.as_bytes());
+                    let mut resp = ResponseHeader::build(*status, None)?;
+                    resp.insert_header(http::header::CONTENT_LENGTH, bytes.len().to_string())?;
+                    session.write_response_header(Box::new(resp), false).await?;
+                    session.write_response_body(Some(bytes), true).await?;
+                }
+                RouteAction::Return { status, body: None } => {
+                    let mut resp = ResponseHeader::build(*status, None)?;
+                    resp.insert_header(http::header::CONTENT_LENGTH, "0")?;
+                    session.write_response_header(Box::new(resp), true).await?;
+                }
+            }
+            return Ok(true);
+        }
 
         // Per-client-IP rate and concurrency limits (nginx limit_req / limit_conn).
         let client = client_ip(session);
@@ -825,6 +898,34 @@ mod tests {
             .resolve(Some("other.example.com"), "/api")
             .expect("default route");
         assert!(r.stripped_path.is_none());
+    }
+
+    #[test]
+    fn test_regex_route_fallback() {
+        let mut default_router = Router::new();
+        default_router
+            .insert("/api", create_test_route_value(false))
+            .unwrap();
+
+        let regex_routes = vec![(
+            Regex::new(r"\.(jpg|png)$").unwrap(),
+            create_test_route_value(false),
+        )];
+
+        let proxy = Proxy::with_regex_routes(
+            default_router,
+            regex_routes,
+            std::collections::HashMap::new(),
+            64,
+        );
+
+        // matchit route still wins.
+        assert!(proxy.resolve(None, "/api").is_ok());
+        // regex fallback matches and forwards the full path (no stripping).
+        let r = proxy.resolve(None, "/images/cat.png").expect("regex match");
+        assert!(r.stripped_path.is_none());
+        // no matchit and no regex match -> not found.
+        assert!(proxy.resolve(None, "/images/cat.gif").is_err());
     }
 
     #[test]
