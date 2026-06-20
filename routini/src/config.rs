@@ -118,6 +118,8 @@ pub struct RouteEntry {
     pub retry: RetryConfigInput,
     #[serde(default)]
     pub passive_health: PassiveHealthInput,
+    /// nginx `client_max_body_size` in bytes; `None` = unlimited.
+    pub max_body_size: Option<usize>,
     pub load_balancer: LoadBalancerConfig,
 }
 
@@ -127,7 +129,7 @@ impl RouteEntry {
             .load_balancer
             .upstreams
             .iter()
-            .map(|u| u.address.clone())
+            .map(|u| (u.address.clone(), u.weight))
             .collect::<Vec<_>>();
 
         let config = RouteConfig {
@@ -136,10 +138,12 @@ impl RouteEntry {
             timeouts: self.timeouts.to_timeouts(),
             retry: self.retry.to_retry(),
             passive_health: self.passive_health.to_config(),
+            max_body_size: self.max_body_size,
         };
 
-        let route = Route::with_options(&self.path, upstreams, self.load_balancer.to_lb_opt())?
-            .route_config(config);
+        let route =
+            Route::with_weighted_backends(&self.path, upstreams, self.load_balancer.to_lb_opt())?
+                .route_config(config);
         Ok(route)
     }
 }
@@ -316,7 +320,7 @@ pub struct AdaptiveLbOptConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpstreamConfig {
     pub address: String,
-    /// Currently informational: the route builder treats every backend with equal weight.
+    /// Relative weight; proportionally biases load-balancing selection (nginx `weight=N`).
     #[serde(default = "default_weight")]
     pub weight: usize,
 }

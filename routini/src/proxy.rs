@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use http::StatusCode;
 use matchit::Router;
 use quick_cache::sync::Cache;
@@ -47,6 +48,18 @@ fn client_is_tls(session: &Session) -> bool {
         .digest()
         .map(|d| d.ssl_digest.is_some())
         .unwrap_or(false)
+}
+
+/// Parse the request's `Content-Length`, if present and valid.
+fn content_length(session: &Session) -> Option<usize> {
+    session
+        .req_header()
+        .headers
+        .get(http::header::CONTENT_LENGTH)?
+        .to_str()
+        .ok()?
+        .parse()
+        .ok()
 }
 
 #[derive(Clone)]
@@ -132,6 +145,8 @@ pub struct ConnectionCTX {
     backend: Option<Backend>,
     /// Backends already attempted this request, so retries pick a different one (failover).
     tried: Vec<SocketAddr>,
+    /// Running total of request body bytes seen, for `max_body_size` enforcement.
+    body_seen: usize,
 }
 
 #[async_trait::async_trait]
@@ -144,6 +159,7 @@ impl ProxyHttp for Proxy {
             upstream_start: None,
             backend: None,
             tried: Vec::new(),
+            body_seen: 0,
         }
     }
 
@@ -156,16 +172,49 @@ impl ProxyHttp for Proxy {
             self.resolve(path)
         };
 
-        match resolved {
-            Ok(cached) => {
-                ctx.route = Some(cached);
-                Ok(false)
-            }
+        let cached = match resolved {
+            Ok(cached) => cached,
             Err(_) => {
                 session.respond_error(StatusCode::NOT_FOUND.as_u16()).await?;
-                Ok(true)
+                return Ok(true);
+            }
+        };
+
+        // Reject oversized bodies early via Content-Length (streaming bodies are guarded in
+        // `request_body_filter`).
+        if let Some(max) = cached.runtime.config.max_body_size {
+            if content_length(session).is_some_and(|len| len > max) {
+                session
+                    .respond_error(StatusCode::PAYLOAD_TOO_LARGE.as_u16())
+                    .await?;
+                return Ok(true);
             }
         }
+
+        ctx.route = Some(cached);
+        Ok(false)
+    }
+
+    async fn request_body_filter(
+        &self,
+        _session: &mut Session,
+        body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+        ctx: &mut Self::CTX,
+    ) -> Result<()> {
+        let max = ctx.route.as_ref().and_then(|r| r.runtime.config.max_body_size);
+        if let Some(max) = max {
+            if let Some(chunk) = body.as_ref() {
+                ctx.body_seen = ctx.body_seen.saturating_add(chunk.len());
+                if ctx.body_seen > max {
+                    return Err(Error::explain(
+                        ErrorType::HTTPStatus(StatusCode::PAYLOAD_TOO_LARGE.as_u16()),
+                        "request body exceeds max_body_size",
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn upstream_peer(

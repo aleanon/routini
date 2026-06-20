@@ -86,9 +86,23 @@ impl Route {
     }
 
     /// Construct a route with a fully specified [AdaptiveLbOpt], e.g. when building from config.
+    /// Every backend is given weight 1; use [`Route::with_weighted_backends`] for weighted pools.
     pub fn with_options<A: AsRef<str>>(
         path: impl AsRef<str>,
         backends: impl IntoIterator<Item = A>,
+        lb_options: AdaptiveLbOpt,
+    ) -> Result<Self> {
+        let weighted = backends
+            .into_iter()
+            .map(|addr| (addr.as_ref().to_string(), 1usize));
+        Self::with_weighted_backends(path, weighted, lb_options)
+    }
+
+    /// Construct a route from weighted `(address, weight)` upstreams. Weight proportionally biases
+    /// the load-balancing selectors (nginx `server <addr> weight=N`).
+    pub fn with_weighted_backends(
+        path: impl AsRef<str>,
+        backends: impl IntoIterator<Item = (String, usize)>,
         lb_options: AdaptiveLbOpt,
     ) -> Result<Self> {
         if !PATH_REGEX.is_match(path.as_ref()) {
@@ -100,8 +114,9 @@ impl Route {
 
         let backends = backends
             .into_iter()
-            .map(|addr| {
-                let mut backend = Backend::new(addr.as_ref()).expect("Invalid backend address");
+            .map(|(addr, weight)| {
+                let mut backend = Backend::new_with_weight(&addr, weight.max(1))
+                    .expect("Invalid backend address");
                 let http_peer = HttpPeer::new(backend.addr.clone(), false, String::new());
                 backend.ext.insert(http_peer);
                 backend

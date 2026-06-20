@@ -2653,6 +2653,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "atomic_float",
+ "bytes",
  "color-eyre",
  "config",
  "criterion",

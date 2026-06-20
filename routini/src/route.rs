@@ -281,6 +281,8 @@ pub struct RouteConfig {
     pub timeouts: TimeoutConfig,
     pub retry: RetryConfig,
     pub passive_health: PassiveHealthConfig,
+    /// Maximum request body size in bytes (nginx `client_max_body_size`). `None` = unlimited.
+    pub max_body_size: Option<usize>,
 }
 
 impl Default for RouteConfig {
@@ -291,6 +293,7 @@ impl Default for RouteConfig {
             timeouts: TimeoutConfig::default(),
             retry: RetryConfig::default(),
             passive_health: PassiveHealthConfig::default(),
+            max_body_size: None,
         }
     }
 }
