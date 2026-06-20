@@ -1,38 +1,52 @@
 use http::StatusCode;
 use matchit::Router;
 use quick_cache::sync::Cache;
-use std::{sync::Arc, time::Instant};
+use std::{net::IpAddr, sync::Arc, time::Instant};
 
 use pingora::{
     Error, ErrorSource, ErrorType, ImmutStr, Result, RetryType,
     http::{RequestHeader, ResponseHeader},
     prelude::HttpPeer,
-    protocols::Digest,
+    protocols::{Digest, l4::socket::SocketAddr},
     proxy::{ProxyHttp, Session},
 };
 
 use crate::{
-    adaptive_loadbalancer::{AdaptiveLoadBalancer, decision_engine::AdaptiveDecisionEngine},
     load_balancing::{Backend, Metrics},
-    server_builder::RouteConfig,
+    route::RouteRuntime,
     utils::constants::{DEFAULT_PATH_CACHE_CAPACITY, DEFAULT_PATH_REMAINDER_IDENTIFIER},
 };
 
 pub struct RouteValue {
-    pub lb: Arc<AdaptiveLoadBalancer<AdaptiveDecisionEngine>>,
-    pub route_config: RouteConfig,
+    pub runtime: Arc<RouteRuntime>,
 }
 
 /// The pre-computed result of routing a concrete request path, stored in the path cache.
 ///
-/// Both fields are cheap to clone: `lb` is an `Arc` (the route table is immutable after build,
-/// so the same balancer is shared) and `stripped_path` is computed once and reused, removing the
-/// per-request `format!`/`to_string` allocation from the hot path.
+/// Both fields are cheap to clone: `runtime` is an `Arc` (the route table is immutable after build,
+/// so the same config + balancer is shared) and `stripped_path` is computed once and reused,
+/// removing the per-request `format!`/`to_string` allocation from the hot path.
 pub struct CachedRoute {
-    pub lb: Arc<AdaptiveLoadBalancer<AdaptiveDecisionEngine>>,
+    pub runtime: Arc<RouteRuntime>,
     /// The rewritten upstream path when `strip_path_prefix` is enabled, already encoded as bytes
     /// ready for `set_raw_path`. `None` when the path is forwarded unchanged.
     pub stripped_path: Option<Box<[u8]>>,
+}
+
+/// Extract the client IP from the downstream session, if it is an inet socket.
+fn client_ip(session: &Session) -> Option<IpAddr> {
+    match session.client_addr()? {
+        SocketAddr::Inet(addr) => Some(addr.ip()),
+        _ => None,
+    }
+}
+
+/// Whether the downstream connection terminated TLS at this proxy.
+fn client_is_tls(session: &Session) -> bool {
+    session
+        .digest()
+        .map(|d| d.ssl_digest.is_some())
+        .unwrap_or(false)
 }
 
 #[derive(Clone)]
@@ -68,7 +82,7 @@ impl Proxy {
 
         let (route_value, stripped_path) = self.route(path)?;
         let cached = Arc::new(CachedRoute {
-            lb: route_value.lb.clone(),
+            runtime: route_value.runtime.clone(),
             stripped_path: stripped_path.map(|p| p.into_bytes().into_boxed_slice()),
         });
 
@@ -92,7 +106,8 @@ impl Proxy {
                 let value = m.value;
                 let stripped_path =
                     value
-                        .route_config
+                        .runtime
+                        .config
                         .strip_path_prefix
                         .then_some(m)
                         .and_then(|m| {
@@ -111,8 +126,9 @@ impl Proxy {
 }
 
 pub struct ConnectionCTX {
+    /// The route resolved for this request (set in `request_filter`), shared with later filters.
+    route: Option<Arc<CachedRoute>>,
     upstream_start: Option<Instant>,
-    lb: Option<Arc<AdaptiveLoadBalancer<AdaptiveDecisionEngine>>>,
     backend: Option<Backend>,
 }
 
@@ -122,9 +138,30 @@ impl ProxyHttp for Proxy {
 
     fn new_ctx(&self) -> Self::CTX {
         ConnectionCTX {
+            route: None,
             upstream_start: None,
-            lb: None,
             backend: None,
+        }
+    }
+
+    /// Resolve the route once, up front, so every later filter can read it from `ctx` and so
+    /// short-circuit responses (redirects, limits) have a place to live. A path with no matching
+    /// route is answered with 404 here rather than failing later in `upstream_peer`.
+    async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
+        let resolved = {
+            let path = session.req_header().uri.path();
+            self.resolve(path)
+        };
+
+        match resolved {
+            Ok(cached) => {
+                ctx.route = Some(cached);
+                Ok(false)
+            }
+            Err(_) => {
+                session.respond_error(StatusCode::NOT_FOUND.as_u16()).await?;
+                Ok(true)
+            }
         }
     }
 
@@ -133,10 +170,15 @@ impl ProxyHttp for Proxy {
         session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
-        let path = session.req_header().uri.path();
-        let route = self.resolve(path)?;
+        let route = ctx.route.clone().ok_or(Error {
+            context: Some(ImmutStr::Static("Route not resolved")),
+            cause: None,
+            etype: ErrorType::InternalError,
+            esource: ErrorSource::Internal,
+            retry: RetryType::Decided(false),
+        })?;
 
-        let backend = route.lb.select(&[]).ok_or(Error {
+        let backend = route.runtime.lb.select(&[]).ok_or(Error {
             context: Some(ImmutStr::Static("No healthy backends available")),
             cause: None,
             etype: ErrorType::InternalError,
@@ -157,18 +199,39 @@ impl ProxyHttp for Proxy {
         };
 
         ctx.backend = Some(backend);
-        ctx.lb = Some(route.lb.clone());
 
         Ok(Box::new(peer))
     }
 
     async fn upstream_request_filter(
         &self,
-        _session: &mut Session,
-        _upstream_request: &mut RequestHeader,
+        session: &mut Session,
+        upstream_request: &mut RequestHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
         ctx.upstream_start = Some(Instant::now());
+
+        if let Some(route) = &ctx.route {
+            let ip = client_ip(session);
+            let tls = client_is_tls(session);
+            route
+                .runtime
+                .config
+                .headers
+                .apply_request(upstream_request, ip, tls);
+        }
+        Ok(())
+    }
+
+    async fn response_filter(
+        &self,
+        _session: &mut Session,
+        upstream_response: &mut ResponseHeader,
+        ctx: &mut Self::CTX,
+    ) -> Result<()> {
+        if let Some(route) = &ctx.route {
+            route.runtime.config.headers.apply_response(upstream_response);
+        }
         Ok(())
     }
 
@@ -180,12 +243,10 @@ impl ProxyHttp for Proxy {
     ) -> Result<()> {
         if let Some(start) = ctx.upstream_start {
             let latency = start.elapsed();
-            if let Some(lb) = &ctx.lb {
-                if let Some(backend) = &ctx.backend {
-                    backend
-                        .metrics
-                        .record_latency(latency, lb.config.latency_smoothing_factor);
-                }
+            if let (Some(route), Some(backend)) = (&ctx.route, &ctx.backend) {
+                backend
+                    .metrics
+                    .record_latency(latency, route.runtime.lb.config.latency_smoothing_factor);
             }
         }
         Ok(())
@@ -246,8 +307,11 @@ mod tests {
     use std::collections::BTreeSet;
 
     use crate::{
-        adaptive_loadbalancer::options::AdaptiveLbOpt,
+        adaptive_loadbalancer::{
+            AdaptiveLoadBalancer, decision_engine::AdaptiveDecisionEngine, options::AdaptiveLbOpt,
+        },
         load_balancing::{Backends, discovery::Static},
+        route::RouteConfig,
     };
 
     use super::*;
@@ -259,11 +323,12 @@ mod tests {
         let decision_engine = AdaptiveDecisionEngine::new(&AdaptiveLbOpt::default());
         let lb = AdaptiveLoadBalancer::from_backends(backends, None, decision_engine);
 
+        let config = RouteConfig {
+            strip_path_prefix: strip_path,
+            ..Default::default()
+        };
         RouteValue {
-            lb: Arc::new(lb),
-            route_config: RouteConfig {
-                strip_path_prefix: strip_path,
-            },
+            runtime: Arc::new(RouteRuntime::new(Arc::new(lb), config)),
         }
     }
 
@@ -309,7 +374,7 @@ mod tests {
 
         assert!(result.is_ok());
         let (route_value, stripped_path) = result.unwrap();
-        assert!(route_value.route_config.strip_path_prefix);
+        assert!(route_value.runtime.config.strip_path_prefix);
         assert_eq!(stripped_path, Some("/login".to_string()));
     }
 
@@ -325,7 +390,7 @@ mod tests {
 
         assert!(result.is_ok());
         let (route_value, stripped_path) = result.unwrap();
-        assert!(route_value.route_config.strip_path_prefix);
+        assert!(route_value.runtime.config.strip_path_prefix);
         assert_eq!(stripped_path, Some("/users/123/profile".to_string()));
     }
 
@@ -368,7 +433,7 @@ mod tests {
         let result = proxy.route("/auth/logout");
         assert!(result.is_ok());
         let (route_value, stripped) = result.unwrap();
-        assert!(route_value.route_config.strip_path_prefix);
+        assert!(route_value.runtime.config.strip_path_prefix);
         assert_eq!(stripped, Some("/logout".to_string()));
     }
 

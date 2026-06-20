@@ -3,16 +3,40 @@
 //! The shapes here mirror `config.json` and convert into the builder types in
 //! [`crate::server_builder`], so `main` can construct the whole server from a file instead of
 //! hard-coded values.
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
-use color_eyre::eyre::Result;
+use color_eyre::eyre::{Result, WrapErr};
+use http::{HeaderName, HeaderValue};
 use serde::Deserialize;
 
 use crate::{
     adaptive_loadbalancer::options::AdaptiveLbOpt,
     load_balancing::strategy::Adaptive,
-    server_builder::{Route, RouteConfig, TlsConfig as BuilderTlsConfig},
+    route::{HeaderRules, HostRewrite, RouteConfig},
+    server_builder::{Route, TlsConfig as BuilderTlsConfig},
 };
+
+fn parse_header_pairs(map: &HashMap<String, String>) -> Result<Vec<(HeaderName, HeaderValue)>> {
+    map.iter()
+        .map(|(name, value)| {
+            let name = HeaderName::from_bytes(name.as_bytes())
+                .wrap_err_with(|| format!("Invalid header name '{name}'"))?;
+            let value = HeaderValue::from_str(value)
+                .wrap_err_with(|| format!("Invalid header value '{value}'"))?;
+            Ok((name, value))
+        })
+        .collect()
+}
+
+fn parse_header_names(names: &[String]) -> Result<Vec<HeaderName>> {
+    names
+        .iter()
+        .map(|name| {
+            HeaderName::from_bytes(name.as_bytes())
+                .wrap_err_with(|| format!("Invalid header name '{name}'"))
+        })
+        .collect()
+}
 
 fn default_true() -> bool {
     true
@@ -84,6 +108,8 @@ pub struct RouteEntry {
     pub path: String,
     #[serde(default = "default_true")]
     pub strip_prefix: bool,
+    #[serde(default)]
+    pub headers: HeadersConfig,
     pub load_balancer: LoadBalancerConfig,
 }
 
@@ -96,11 +122,57 @@ impl RouteEntry {
             .map(|u| u.address.clone())
             .collect::<Vec<_>>();
 
+        let config = RouteConfig {
+            strip_path_prefix: self.strip_prefix,
+            headers: self.headers.to_rules()?,
+        };
+
         let route = Route::with_options(&self.path, upstreams, self.load_balancer.to_lb_opt())?
-            .route_config(RouteConfig {
-                strip_path_prefix: self.strip_prefix,
-            });
+            .route_config(config);
         Ok(route)
+    }
+}
+
+/// Header manipulation config for a route. Mirrors nginx `proxy_set_header` / `add_header`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct HeadersConfig {
+    /// Add `X-Forwarded-For/Proto` and `X-Real-IP` (default true).
+    pub forwarded: Option<bool>,
+    /// Append to an existing `X-Forwarded-For` instead of resetting it (default false).
+    pub trusted_proxy: Option<bool>,
+    /// `"preserve"` (default) or a literal value to set the upstream `Host` header to.
+    pub host: Option<String>,
+    #[serde(default)]
+    pub set_request: HashMap<String, String>,
+    #[serde(default)]
+    pub remove_request: Vec<String>,
+    #[serde(default)]
+    pub add_response: HashMap<String, String>,
+    #[serde(default)]
+    pub remove_response: Vec<String>,
+}
+
+impl HeadersConfig {
+    fn to_rules(&self) -> Result<HeaderRules> {
+        let mut rules = HeaderRules::default();
+        if let Some(forwarded) = self.forwarded {
+            rules.forwarded = forwarded;
+        }
+        if let Some(trusted) = self.trusted_proxy {
+            rules.trusted_proxy = trusted;
+        }
+        if let Some(host) = &self.host {
+            rules.host = if host.eq_ignore_ascii_case("preserve") {
+                HostRewrite::Preserve
+            } else {
+                HostRewrite::Set(host.clone())
+            };
+        }
+        rules.set_request = parse_header_pairs(&self.set_request)?;
+        rules.remove_request = parse_header_names(&self.remove_request)?;
+        rules.add_response = parse_header_pairs(&self.add_response)?;
+        rules.remove_response = parse_header_names(&self.remove_response)?;
+        Ok(rules)
     }
 }
 

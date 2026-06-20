@@ -54,7 +54,7 @@ impl ServeHttp for SetStrategyEndpoint {
                 match serde_json::from_slice::<NewStrategy>(&body) {
                     Ok(NewStrategy { path, strategy }) => match self.router.route(&path) {
                         Ok((route_value, _)) => {
-                            if route_value.lb.update_strategy(strategy.clone()).await {
+                            if route_value.runtime.lb.update_strategy(strategy.clone()).await {
                                 info!("Strategy updated to {} for {}", &strategy, path);
                             } else {
                                 error!("Strategy already in use {}", strategy);

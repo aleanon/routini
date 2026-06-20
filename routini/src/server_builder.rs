@@ -1,4 +1,10 @@
-use std::{collections::BTreeSet, net::TcpListener, sync::LazyLock, thread, time::Duration};
+use std::{
+    collections::BTreeSet,
+    net::TcpListener,
+    sync::{Arc, LazyLock},
+    thread,
+    time::Duration,
+};
 
 use color_eyre::eyre::{Result, eyre};
 use matchit::Router;
@@ -17,9 +23,14 @@ use crate::{
     },
     load_balancing::{Backend, Backends, discovery::Static, strategy::Adaptive},
     proxy::{Proxy, RouteValue},
+    route::RouteRuntime,
     set_strategy_endpoint::SetStrategyEndpoint,
     utils::constants::{DEFAULT_WILDCARD_IDENTIFIER, PROMETHEUS_ENDPOINT_ADDRESS},
 };
+
+// Re-export so existing `server_builder::RouteConfig` references keep working; the canonical
+// definition now lives in `crate::route` alongside the rest of the per-route runtime config.
+pub use crate::route::RouteConfig;
 
 /// TLS termination settings for the proxy's public listener.
 pub struct TlsConfig {
@@ -49,23 +60,6 @@ pub fn proxy_server(listener: TcpListener) -> ServerBuilder {
         server_config: None,
         tls: None,
         prometheus_address: None,
-    }
-}
-
-pub struct RouteConfig {
-    /// Strips the matching part of the path
-    /// if we add a route /auth/*
-    /// then we make a request to /auth/health,
-    /// /auth will be stripped and the backend will receive the request
-    /// with path /health
-    pub strip_path_prefix: bool,
-}
-
-impl Default for RouteConfig {
-    fn default() -> Self {
-        Self {
-            strip_path_prefix: true,
-        }
     }
 }
 
@@ -214,8 +208,7 @@ impl ServerBuilder {
             tracing::info!("Adding route: {}", route.path);
 
             let route_value = RouteValue {
-                lb: task,
-                route_config: route.route_config,
+                runtime: Arc::new(RouteRuntime::new(task, route.route_config)),
             };
 
             routes
@@ -367,6 +360,7 @@ mod tests {
             .include_health_check(None)
             .route_config(RouteConfig {
                 strip_path_prefix: false,
+                ..Default::default()
             });
 
         assert_eq!(route.lb_options.max_iterations, 20);
