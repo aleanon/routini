@@ -15,6 +15,7 @@ async fn test_upstream_peer_not_found_route() {
         .include_health_check(None)
         .route_config(RouteConfig {
             strip_path_prefix: false,
+            ..Default::default()
         });
 
     let app = TestApp::new(vec![route]).await.unwrap();
@@ -39,6 +40,7 @@ async fn test_upstream_peer_with_real_backends() {
         .include_health_check(None)
         .route_config(RouteConfig {
             strip_path_prefix: false,
+            ..Default::default()
         });
 
     let app = TestApp::new(vec![route]).await.unwrap();
@@ -120,6 +122,7 @@ async fn test_upstream_peer_load_balancing() {
         .include_health_check(None)
         .route_config(RouteConfig {
             strip_path_prefix: false,
+            ..Default::default()
         });
 
     let app = TestApp::new(vec![route]).await.unwrap();

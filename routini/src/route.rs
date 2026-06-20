@@ -115,7 +115,7 @@ impl ConnLimiter {
     }
 }
 
-/// TLS settings for connecting to the upstream (nginx `proxy_pass https://`).
+/// Settings for connecting to the upstream (nginx `proxy_pass https://`, gRPC/HTTP2 upstreams).
 #[derive(Debug, Clone)]
 pub struct UpstreamTls {
     pub enabled: bool,
@@ -123,6 +123,8 @@ pub struct UpstreamTls {
     pub sni: Option<String>,
     /// Verify the upstream certificate and hostname.
     pub verify: bool,
+    /// Negotiate HTTP/2 to the upstream (required for gRPC). Over TLS this is via ALPN.
+    pub h2: bool,
 }
 
 impl Default for UpstreamTls {
@@ -131,6 +133,7 @@ impl Default for UpstreamTls {
             enabled: false,
             sni: None,
             verify: true,
+            h2: false,
         }
     }
 }

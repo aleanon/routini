@@ -497,6 +497,11 @@ impl ProxyHttp for Proxy {
             }
         };
 
+        if tls.h2 {
+            // Prefer HTTP/2 (fall back to HTTP/1.1); over TLS this advertises h2 via ALPN.
+            peer.options.set_http_version(2, 1);
+        }
+
         route.runtime.config.timeouts.apply(&mut peer);
 
         ctx.backend = Some(backend);

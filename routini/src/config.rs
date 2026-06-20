@@ -289,6 +289,9 @@ pub struct UpstreamTlsInput {
     pub enabled: bool,
     pub sni: Option<String>,
     pub verify: Option<bool>,
+    /// Negotiate HTTP/2 to the upstream (required for gRPC).
+    #[serde(default)]
+    pub h2: bool,
 }
 
 impl UpstreamTlsInput {
@@ -297,6 +300,7 @@ impl UpstreamTlsInput {
             enabled: self.enabled,
             sni: self.sni.clone(),
             verify: self.verify.unwrap_or(true),
+            h2: self.h2,
         }
     }
 }

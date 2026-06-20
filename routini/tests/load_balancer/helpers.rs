@@ -40,6 +40,7 @@ impl TestApp {
                 .expect("Failed to construct route")
                 .route_config(RouteConfig {
                     strip_path_prefix: false,
+                    ..Default::default()
                 });
 
             proxy_server(listener)
