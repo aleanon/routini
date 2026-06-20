@@ -110,6 +110,8 @@ impl TlsConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct RouteEntry {
     pub path: String,
+    /// Optional virtual host (nginx `server_name`); routes with no host form the default server.
+    pub host: Option<String>,
     #[serde(default = "default_true")]
     pub strip_prefix: bool,
     #[serde(default)]
@@ -143,9 +145,12 @@ impl RouteEntry {
             max_body_size: self.max_body_size,
         };
 
-        let route =
+        let mut route =
             Route::with_weighted_backends(&self.path, upstreams, self.load_balancer.to_lb_opt())?
                 .route_config(config);
+        if let Some(host) = &self.host {
+            route = route.host(host.clone());
+        }
         Ok(route)
     }
 }

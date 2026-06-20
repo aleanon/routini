@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     net::TcpListener,
     sync::{Arc, LazyLock},
     thread,
@@ -25,7 +25,9 @@ use crate::{
     proxy::{Proxy, RouteValue},
     route::RouteRuntime,
     set_strategy_endpoint::SetStrategyEndpoint,
-    utils::constants::{DEFAULT_WILDCARD_IDENTIFIER, PROMETHEUS_ENDPOINT_ADDRESS},
+    utils::constants::{
+        DEFAULT_PATH_CACHE_CAPACITY, DEFAULT_WILDCARD_IDENTIFIER, PROMETHEUS_ENDPOINT_ADDRESS,
+    },
 };
 
 // Re-export so existing `server_builder::RouteConfig` references keep working; the canonical
@@ -71,6 +73,8 @@ pub struct Route {
     /// `max_iterations` and `health_check_interval` are also adjustable via the builder methods.
     pub lb_options: AdaptiveLbOpt,
     pub route_config: RouteConfig,
+    /// Optional virtual host this route belongs to (nginx `server_name`). `None` = default server.
+    pub host: Option<String>,
 }
 
 impl Route {
@@ -133,7 +137,14 @@ impl Route {
             backends: Backends::new(Static::new(backends)),
             lb_options,
             route_config: RouteConfig::default(),
+            host: None,
         })
+    }
+
+    /// Restrict this route to a named virtual host (nginx `server_name`).
+    pub fn host(mut self, host: impl Into<String>) -> Self {
+        self.host = Some(host.into());
+        self
     }
 
     /// Default: [DEFAULT_MAX_ALGORITHM_ITERATIONS](crate::utils::constants::DEFAULT_MAX_ALGORITHM_ITERATIONS)
@@ -211,7 +222,8 @@ impl ServerBuilder {
         server_config.upstream_keepalive_pool_size = 200000;
         let mut server = Server::new_with_opt_and_conf(None, server_config);
 
-        let mut routes = Router::new();
+        let mut default_router = Router::new();
+        let mut vhost_routers: HashMap<String, Router<RouteValue>> = HashMap::new();
         for route in self.routes {
             let lb_options = route.lb_options;
 
@@ -228,17 +240,29 @@ impl ServerBuilder {
             let task = background_service.task();
             server.add_service(background_service);
 
-            tracing::info!("Adding route: {}", route.path);
-
             let route_value = RouteValue {
                 runtime: Arc::new(RouteRuntime::new(task, route.route_config)),
             };
 
-            routes
-                .insert(route.path, route_value)
-                .expect("Invalid route");
+            match route.host {
+                Some(host) => {
+                    tracing::info!("Adding route: {} (host: {host})", route.path);
+                    vhost_routers
+                        .entry(host.to_ascii_lowercase())
+                        .or_insert_with(Router::new)
+                        .insert(route.path, route_value)
+                        .expect("Invalid route");
+                }
+                None => {
+                    tracing::info!("Adding route: {}", route.path);
+                    default_router
+                        .insert(route.path, route_value)
+                        .expect("Invalid route");
+                }
+            }
         }
-        let mut router = Proxy::new(routes);
+        let mut router =
+            Proxy::with_vhosts(default_router, vhost_routers, DEFAULT_PATH_CACHE_CAPACITY);
         router.set_access_log(self.access_log);
 
         if let Some(endpoint_address) = self.set_strategy_endpoint {

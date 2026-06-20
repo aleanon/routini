@@ -62,14 +62,24 @@ fn content_length(session: &Session) -> Option<usize> {
         .ok()
 }
 
+/// A name-based virtual host: its own path router and path cache (nginx `server` block).
+struct VHost {
+    router: Router<RouteValue>,
+    cache: Cache<Box<str>, Arc<CachedRoute>>,
+}
+
 #[derive(Clone)]
 pub struct Proxy {
-    routes: Arc<Router<RouteValue>>,
+    /// Router + path cache for requests that match no configured virtual host (the default server).
+    default_router: Arc<Router<RouteValue>>,
     /// Bounded concurrent cache mapping a concrete request path to its resolved route. The first
     /// request to a path does the matchit lookup and stripping; subsequent requests reuse the
     /// cached `Arc<CachedRoute>` with no allocation. Routes never change after build, so entries
     /// never need invalidation — eviction only bounds memory.
-    cache: Arc<Cache<Box<str>, Arc<CachedRoute>>>,
+    default_cache: Arc<Cache<Box<str>, Arc<CachedRoute>>>,
+    /// Name-based virtual hosts, keyed by lowercased host. Empty in the common single-host case,
+    /// in which routing skips host handling entirely and behaves exactly like path-only routing.
+    vhosts: Arc<std::collections::HashMap<String, VHost>>,
     /// Emit a structured access-log line per request (nginx `access_log on/off`).
     access_log: bool,
 }
@@ -80,9 +90,32 @@ impl Proxy {
     }
 
     pub fn with_cache_capacity(routes: Router<RouteValue>, capacity: usize) -> Self {
+        Self::with_vhosts(routes, std::collections::HashMap::new(), capacity)
+    }
+
+    /// Build a proxy with a default router plus name-based virtual host routers.
+    pub fn with_vhosts(
+        default_router: Router<RouteValue>,
+        vhosts: std::collections::HashMap<String, Router<RouteValue>>,
+        capacity: usize,
+    ) -> Self {
+        let vhosts = vhosts
+            .into_iter()
+            .map(|(host, router)| {
+                (
+                    host,
+                    VHost {
+                        router,
+                        cache: Cache::new(capacity),
+                    },
+                )
+            })
+            .collect();
+
         Proxy {
-            routes: Arc::new(routes),
-            cache: Arc::new(Cache::new(capacity)),
+            default_router: Arc::new(default_router),
+            default_cache: Arc::new(Cache::new(capacity)),
+            vhosts: Arc::new(vhosts),
             access_log: true,
         }
     }
@@ -92,27 +125,57 @@ impl Proxy {
         self.access_log = enabled;
     }
 
-    /// Resolve a concrete request path to its (cached) route.
+    /// Resolve a request's `host` + `path` to its (cached) route.
     ///
-    /// On a cache hit this is a single concurrent-map lookup plus an `Arc` clone. On a miss it
-    /// performs the matchit lookup and computes the stripped path once, then caches the result.
-    pub fn resolve(&self, path: &str) -> Result<Arc<CachedRoute>> {
-        if let Some(cached) = self.cache.get(path) {
+    /// When virtual hosts are configured and the host matches one, that vhost's router/cache are
+    /// used; otherwise the default server handles it. In the common (no-vhost) case this is a
+    /// single concurrent-map lookup plus an `Arc` clone, identical to path-only routing.
+    pub fn resolve(&self, host: Option<&str>, path: &str) -> Result<Arc<CachedRoute>> {
+        if !self.vhosts.is_empty() {
+            if let Some(host) = host {
+                // Match nginx server_name semantics: case-insensitive, ignore the port.
+                let key = host
+                    .split(':')
+                    .next()
+                    .unwrap_or(host)
+                    .to_ascii_lowercase();
+                if let Some(vhost) = self.vhosts.get(&key) {
+                    return Self::resolve_in(&vhost.router, &vhost.cache, path);
+                }
+            }
+        }
+        Self::resolve_in(&self.default_router, &self.default_cache, path)
+    }
+
+    fn resolve_in(
+        router: &Router<RouteValue>,
+        cache: &Cache<Box<str>, Arc<CachedRoute>>,
+        path: &str,
+    ) -> Result<Arc<CachedRoute>> {
+        if let Some(cached) = cache.get(path) {
             return Ok(cached);
         }
 
-        let (route_value, stripped_path) = self.route(path)?;
+        let (route_value, stripped_path) = Self::route_in(router, path)?;
         let cached = Arc::new(CachedRoute {
             runtime: route_value.runtime.clone(),
             stripped_path: stripped_path.map(|p| p.into_bytes().into_boxed_slice()),
         });
 
-        self.cache.insert(path.into(), cached.clone());
+        cache.insert(path.into(), cached.clone());
         Ok(cached)
     }
 
+    /// Look up a path in the default router (used by the strategy endpoint and tests).
     pub fn route(&self, path: &str) -> Result<(&RouteValue, Option<String>)> {
-        self.routes
+        Self::route_in(&self.default_router, path)
+    }
+
+    fn route_in<'r>(
+        router: &'r Router<RouteValue>,
+        path: &str,
+    ) -> Result<(&'r RouteValue, Option<String>)> {
+        router
             .at(path)
             .map_err(|e| {
                 Box::new(Error {
@@ -182,11 +245,18 @@ impl ProxyHttp for Proxy {
     /// route is answered with 404 here rather than failing later in `upstream_peer`.
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
         let resolved = {
-            let path = session.req_header().uri.path();
+            let req = session.req_header();
+            let path = req.uri.path();
             if self.access_log {
                 ctx.orig_path = Some(Box::from(path));
             }
-            self.resolve(path)
+            // Prefer the URI authority (HTTP/2 :authority / absolute-form), fall back to Host header.
+            let host = req.uri.host().or_else(|| {
+                req.headers
+                    .get(http::header::HOST)
+                    .and_then(|h| h.to_str().ok())
+            });
+            self.resolve(host, path)
         };
 
         let cached = match resolved {
@@ -635,12 +705,44 @@ mod tests {
 
         let proxy = Proxy::new(router);
 
-        let first = proxy.resolve("/auth/login").expect("should resolve");
+        let first = proxy.resolve(None, "/auth/login").expect("should resolve");
         assert_eq!(first.stripped_path.as_deref(), Some(b"/login".as_slice()));
 
         // Second resolve of the same path must return the very same cached Arc.
-        let second = proxy.resolve("/auth/login").expect("should resolve");
+        let second = proxy.resolve(None, "/auth/login").expect("should resolve");
         assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn test_vhost_routing_falls_back_to_default() {
+        let mut default_router = Router::new();
+        default_router
+            .insert("/api", create_test_route_value(false))
+            .unwrap();
+
+        let mut vhost_router = Router::new();
+        vhost_router
+            .insert("/auth/{*rest}", create_test_route_value(true))
+            .unwrap();
+        let mut vhosts = std::collections::HashMap::new();
+        vhosts.insert("api.example.com".to_string(), vhost_router);
+
+        let proxy = Proxy::with_vhosts(default_router, vhosts, 64);
+
+        // Matching host uses the vhost router (case-insensitive, port ignored).
+        let r = proxy
+            .resolve(Some("API.example.com:8443"), "/auth/login")
+            .expect("vhost route");
+        assert_eq!(r.stripped_path.as_deref(), Some(b"/login".as_slice()));
+
+        // The vhost path is not in the default router.
+        assert!(proxy.resolve(None, "/auth/login").is_err());
+
+        // Unknown host falls back to the default server.
+        let r = proxy
+            .resolve(Some("other.example.com"), "/api")
+            .expect("default route");
+        assert!(r.stripped_path.is_none());
     }
 
     #[test]
@@ -651,7 +753,7 @@ mod tests {
             .expect("Failed to insert route");
 
         let proxy = Proxy::new(router);
-        let resolved = proxy.resolve("/api").expect("should resolve");
+        let resolved = proxy.resolve(None, "/api").expect("should resolve");
         assert!(resolved.stripped_path.is_none());
     }
 
