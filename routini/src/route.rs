@@ -3,14 +3,44 @@
 //! [`RouteConfig`] holds everything configurable per route (header rules, etc.). [`RouteRuntime`]
 //! bundles a route's config with its load balancer and is what the proxy stores per route and
 //! caches per concrete request path.
-use std::{net::IpAddr, sync::Arc};
+use std::{net::IpAddr, sync::Arc, time::Duration};
 
 use http::{HeaderName, HeaderValue, header};
 use pingora::http::{RequestHeader, ResponseHeader};
+use pingora::prelude::HttpPeer;
 
 use crate::adaptive_loadbalancer::{AdaptiveLoadBalancer, decision_engine::AdaptiveDecisionEngine};
 
 pub type SharedLb = Arc<AdaptiveLoadBalancer<AdaptiveDecisionEngine>>;
+
+/// Upstream connection/transfer timeouts, applied to the [`HttpPeer`] per request.
+/// `None` leaves Pingora's default in place. Equivalent to nginx `proxy_connect_timeout`,
+/// `proxy_read_timeout`, `proxy_send_timeout`.
+#[derive(Debug, Clone, Default)]
+pub struct TimeoutConfig {
+    pub connect: Option<Duration>,
+    pub read: Option<Duration>,
+    pub write: Option<Duration>,
+    pub idle: Option<Duration>,
+}
+
+impl TimeoutConfig {
+    /// Overlay any configured timeouts onto a peer's options.
+    pub fn apply(&self, peer: &mut HttpPeer) {
+        if let Some(connect) = self.connect {
+            peer.options.connection_timeout = Some(connect);
+        }
+        if let Some(read) = self.read {
+            peer.options.read_timeout = Some(read);
+        }
+        if let Some(write) = self.write {
+            peer.options.write_timeout = Some(write);
+        }
+        if let Some(idle) = self.idle {
+            peer.options.idle_timeout = Some(idle);
+        }
+    }
+}
 
 /// Policy for the `Host` header sent to the upstream.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -121,6 +151,7 @@ pub struct RouteConfig {
     /// Strip the matched route prefix before forwarding (see the route docs).
     pub strip_path_prefix: bool,
     pub headers: HeaderRules,
+    pub timeouts: TimeoutConfig,
 }
 
 impl Default for RouteConfig {
@@ -128,6 +159,7 @@ impl Default for RouteConfig {
         Self {
             strip_path_prefix: true,
             headers: HeaderRules::default(),
+            timeouts: TimeoutConfig::default(),
         }
     }
 }
@@ -207,6 +239,24 @@ mod tests {
         assert_eq!(r.headers.get(http::header::HOST).unwrap(), "upstream.internal");
         assert_eq!(r.headers.get("x-api").unwrap(), "1");
         assert!(r.headers.get(http::header::COOKIE).is_none());
+    }
+
+    #[test]
+    fn timeouts_overlay_peer_options() {
+        let cfg = TimeoutConfig {
+            connect: Some(Duration::from_millis(500)),
+            read: Some(Duration::from_secs(5)),
+            write: None,
+            idle: None,
+        };
+        let mut peer = HttpPeer::new("127.0.0.1:8080", false, String::new());
+        let default_write = peer.options.write_timeout;
+        cfg.apply(&mut peer);
+
+        assert_eq!(peer.options.connection_timeout, Some(Duration::from_millis(500)));
+        assert_eq!(peer.options.read_timeout, Some(Duration::from_secs(5)));
+        // unset fields are left untouched
+        assert_eq!(peer.options.write_timeout, default_write);
     }
 
     #[test]

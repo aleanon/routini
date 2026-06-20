@@ -190,13 +190,15 @@ impl ProxyHttp for Proxy {
             session.req_header_mut().set_raw_path(stripped_path)?;
         }
 
-        let peer = match backend.ext.get::<HttpPeer>() {
+        let mut peer = match backend.ext.get::<HttpPeer>() {
             Some(peer) => peer.clone(),
             None => {
                 log::error!("HttpPeer not attached to backend: {}", &backend.addr);
                 HttpPeer::new(backend.addr.clone(), false, String::new())
             }
         };
+
+        route.runtime.config.timeouts.apply(&mut peer);
 
         ctx.backend = Some(backend);
 

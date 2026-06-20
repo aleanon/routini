@@ -12,7 +12,7 @@ use serde::Deserialize;
 use crate::{
     adaptive_loadbalancer::options::AdaptiveLbOpt,
     load_balancing::strategy::Adaptive,
-    route::{HeaderRules, HostRewrite, RouteConfig},
+    route::{HeaderRules, HostRewrite, RouteConfig, TimeoutConfig},
     server_builder::{Route, TlsConfig as BuilderTlsConfig},
 };
 
@@ -110,6 +110,8 @@ pub struct RouteEntry {
     pub strip_prefix: bool,
     #[serde(default)]
     pub headers: HeadersConfig,
+    #[serde(default)]
+    pub timeouts: TimeoutsConfig,
     pub load_balancer: LoadBalancerConfig,
 }
 
@@ -125,6 +127,7 @@ impl RouteEntry {
         let config = RouteConfig {
             strip_path_prefix: self.strip_prefix,
             headers: self.headers.to_rules()?,
+            timeouts: self.timeouts.to_timeouts(),
         };
 
         let route = Route::with_options(&self.path, upstreams, self.load_balancer.to_lb_opt())?
@@ -150,6 +153,26 @@ pub struct HeadersConfig {
     pub add_response: HashMap<String, String>,
     #[serde(default)]
     pub remove_response: Vec<String>,
+}
+
+/// Upstream timeouts in milliseconds. Unset fields keep Pingora's defaults.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TimeoutsConfig {
+    pub connect_ms: Option<u64>,
+    pub read_ms: Option<u64>,
+    pub write_ms: Option<u64>,
+    pub idle_ms: Option<u64>,
+}
+
+impl TimeoutsConfig {
+    fn to_timeouts(&self) -> TimeoutConfig {
+        TimeoutConfig {
+            connect: self.connect_ms.map(Duration::from_millis),
+            read: self.read_ms.map(Duration::from_millis),
+            write: self.write_ms.map(Duration::from_millis),
+            idle: self.idle_ms.map(Duration::from_millis),
+        }
+    }
 }
 
 impl HeadersConfig {
