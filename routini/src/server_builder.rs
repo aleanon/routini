@@ -63,6 +63,7 @@ pub fn proxy_server(listener: TcpListener) -> ServerBuilder {
         tls: None,
         prometheus_address: None,
         access_log: true,
+        https_redirect: false,
     }
 }
 
@@ -180,6 +181,7 @@ pub struct ServerBuilder {
     tls: Option<TlsConfig>,
     prometheus_address: Option<String>,
     access_log: bool,
+    https_redirect: bool,
 }
 impl ServerBuilder {
     pub fn add_route(mut self, route: impl Into<Route>) -> Self {
@@ -213,6 +215,12 @@ impl ServerBuilder {
     /// Enable/disable the per-request access log (nginx `access_log on/off`). Default: on.
     pub fn access_log(mut self, enabled: bool) -> Self {
         self.access_log = enabled;
+        self
+    }
+
+    /// Redirect plain-HTTP requests to their `https://` equivalent. Default: off.
+    pub fn https_redirect(mut self, enabled: bool) -> Self {
+        self.https_redirect = enabled;
         self
     }
 
@@ -264,6 +272,7 @@ impl ServerBuilder {
         let mut router =
             Proxy::with_vhosts(default_router, vhost_routers, DEFAULT_PATH_CACHE_CAPACITY);
         router.set_access_log(self.access_log);
+        router.set_https_redirect(self.https_redirect);
 
         if let Some(endpoint_address) = self.set_strategy_endpoint {
             let endpoint = SetStrategyEndpoint::service(router.clone(), &endpoint_address);

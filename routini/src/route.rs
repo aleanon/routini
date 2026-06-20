@@ -59,6 +59,26 @@ impl Default for PassiveHealthConfig {
     }
 }
 
+/// TLS settings for connecting to the upstream (nginx `proxy_pass https://`).
+#[derive(Debug, Clone)]
+pub struct UpstreamTls {
+    pub enabled: bool,
+    /// SNI / certificate hostname to present and verify against.
+    pub sni: Option<String>,
+    /// Verify the upstream certificate and hostname.
+    pub verify: bool,
+}
+
+impl Default for UpstreamTls {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            sni: None,
+            verify: true,
+        }
+    }
+}
+
 struct FailWindow {
     count: u32,
     window_start: Instant,
@@ -283,6 +303,9 @@ pub struct RouteConfig {
     pub passive_health: PassiveHealthConfig,
     /// Maximum request body size in bytes (nginx `client_max_body_size`). `None` = unlimited.
     pub max_body_size: Option<usize>,
+    pub upstream_tls: UpstreamTls,
+    /// `Strict-Transport-Security` header value to add on TLS responses (nginx HSTS `add_header`).
+    pub hsts: Option<String>,
 }
 
 impl Default for RouteConfig {
@@ -294,6 +317,8 @@ impl Default for RouteConfig {
             retry: RetryConfig::default(),
             passive_health: PassiveHealthConfig::default(),
             max_body_size: None,
+            upstream_tls: UpstreamTls::default(),
+            hsts: None,
         }
     }
 }

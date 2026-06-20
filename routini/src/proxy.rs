@@ -82,6 +82,8 @@ pub struct Proxy {
     vhosts: Arc<std::collections::HashMap<String, VHost>>,
     /// Emit a structured access-log line per request (nginx `access_log on/off`).
     access_log: bool,
+    /// Redirect plain-HTTP requests to `https://` (nginx `return 301 https://...`).
+    https_redirect: bool,
 }
 
 impl Proxy {
@@ -117,12 +119,18 @@ impl Proxy {
             default_cache: Arc::new(Cache::new(capacity)),
             vhosts: Arc::new(vhosts),
             access_log: true,
+            https_redirect: false,
         }
     }
 
     /// Enable or disable the per-request access log.
     pub fn set_access_log(&mut self, enabled: bool) {
         self.access_log = enabled;
+    }
+
+    /// Redirect plain-HTTP requests to the `https://` equivalent.
+    pub fn set_https_redirect(&mut self, enabled: bool) {
+        self.https_redirect = enabled;
     }
 
     /// Resolve a request's `host` + `path` to its (cached) route.
@@ -244,6 +252,35 @@ impl ProxyHttp for Proxy {
     /// short-circuit responses (redirects, limits) have a place to live. A path with no matching
     /// route is answered with 404 here rather than failing later in `upstream_peer`.
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
+        // Redirect plain-HTTP requests to HTTPS before any routing work.
+        if self.https_redirect && !client_is_tls(session) {
+            let location = {
+                let req = session.req_header();
+                let host = req.uri.host().or_else(|| {
+                    req.headers
+                        .get(http::header::HOST)
+                        .and_then(|h| h.to_str().ok())
+                });
+                host.map(|host| {
+                    let pq = req
+                        .uri
+                        .path_and_query()
+                        .map(|pq| pq.as_str())
+                        .unwrap_or("/");
+                    format!("https://{host}{pq}")
+                })
+            };
+
+            if let Some(location) = location {
+                let mut resp =
+                    ResponseHeader::build(StatusCode::MOVED_PERMANENTLY.as_u16(), None)?;
+                resp.insert_header(http::header::LOCATION, location)?;
+                resp.insert_header(http::header::CONTENT_LENGTH, "0")?;
+                session.write_response_header(Box::new(resp), true).await?;
+                return Ok(true);
+            }
+        }
+
         let resolved = {
             let req = session.req_header();
             let path = req.uri.path();
@@ -342,11 +379,22 @@ impl ProxyHttp for Proxy {
             session.req_header_mut().set_raw_path(stripped_path)?;
         }
 
-        let mut peer = match backend.ext.get::<HttpPeer>() {
-            Some(peer) => peer.clone(),
-            None => {
-                log::error!("HttpPeer not attached to backend: {}", &backend.addr);
-                HttpPeer::new(backend.addr.clone(), false, String::new())
+        let tls = &route.runtime.config.upstream_tls;
+        let mut peer = if tls.enabled {
+            // Build a fresh HTTPS peer (sni + verification). Per-request cost is acceptable since
+            // TLS upstreams are not the throughput-critical path; plain HTTP keeps the cached peer.
+            let sni = tls.sni.clone().unwrap_or_default();
+            let mut peer = HttpPeer::new(backend.addr.clone(), true, sni);
+            peer.options.verify_cert = tls.verify;
+            peer.options.verify_hostname = tls.verify;
+            peer
+        } else {
+            match backend.ext.get::<HttpPeer>() {
+                Some(peer) => peer.clone(),
+                None => {
+                    log::error!("HttpPeer not attached to backend: {}", &backend.addr);
+                    HttpPeer::new(backend.addr.clone(), false, String::new())
+                }
             }
         };
 
@@ -379,12 +427,20 @@ impl ProxyHttp for Proxy {
 
     async fn response_filter(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         upstream_response: &mut ResponseHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
         if let Some(route) = &ctx.route {
             route.runtime.config.headers.apply_response(upstream_response);
+
+            // HSTS is only meaningful over HTTPS, so add it only for TLS-terminated requests.
+            if let Some(hsts) = &route.runtime.config.hsts {
+                if client_is_tls(session) {
+                    let _ = upstream_response
+                        .insert_header(http::header::STRICT_TRANSPORT_SECURITY, hsts);
+                }
+            }
         }
         Ok(())
     }

@@ -14,6 +14,7 @@ use crate::{
     load_balancing::strategy::Adaptive,
     route::{
         HeaderRules, HostRewrite, PassiveHealthConfig, RetryConfig, RouteConfig, TimeoutConfig,
+        UpstreamTls,
     },
     server_builder::{Route, TlsConfig as BuilderTlsConfig},
 };
@@ -77,6 +78,8 @@ pub struct ServerConfig {
     pub set_strategy_endpoint: Option<String>,
     /// Per-request access log (nginx `access_log on/off`). Defaults to on when omitted.
     pub access_log: Option<bool>,
+    /// Redirect plain-HTTP requests to `https://`. Defaults to off.
+    pub https_redirect: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -124,6 +127,10 @@ pub struct RouteEntry {
     pub passive_health: PassiveHealthInput,
     /// nginx `client_max_body_size` in bytes; `None` = unlimited.
     pub max_body_size: Option<usize>,
+    #[serde(default)]
+    pub upstream_tls: UpstreamTlsInput,
+    /// `Strict-Transport-Security` value to add on TLS responses.
+    pub hsts: Option<String>,
     pub load_balancer: LoadBalancerConfig,
 }
 
@@ -143,6 +150,8 @@ impl RouteEntry {
             retry: self.retry.to_retry(),
             passive_health: self.passive_health.to_config(),
             max_body_size: self.max_body_size,
+            upstream_tls: self.upstream_tls.to_upstream_tls(),
+            hsts: self.hsts.clone(),
         };
 
         let mut route =
@@ -211,6 +220,25 @@ impl RetryConfigInput {
             retry.retry_on_connect_error = on_connect;
         }
         retry
+    }
+}
+
+/// Upstream TLS config (nginx `proxy_pass https://`).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct UpstreamTlsInput {
+    #[serde(default)]
+    pub enabled: bool,
+    pub sni: Option<String>,
+    pub verify: Option<bool>,
+}
+
+impl UpstreamTlsInput {
+    fn to_upstream_tls(&self) -> UpstreamTls {
+        UpstreamTls {
+            enabled: self.enabled,
+            sni: self.sni.clone(),
+            verify: self.verify.unwrap_or(true),
+        }
     }
 }
 

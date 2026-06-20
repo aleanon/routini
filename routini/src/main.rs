@@ -69,6 +69,10 @@ fn main() -> Result<()> {
         builder = builder.access_log(access_log);
     }
 
+    if let Some(https_redirect) = config.server.https_redirect {
+        builder = builder.https_redirect(https_redirect);
+    }
+
     if let Some(tls) = &config.proxy.tls {
         builder = builder.tls(tls.to_builder_tls());
     }
