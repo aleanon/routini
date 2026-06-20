@@ -60,6 +60,7 @@ pub fn proxy_server(listener: TcpListener) -> ServerBuilder {
         server_config: None,
         tls: None,
         prometheus_address: None,
+        access_log: true,
     }
 }
 
@@ -167,6 +168,7 @@ pub struct ServerBuilder {
     server_config: Option<ServerConf>,
     tls: Option<TlsConfig>,
     prometheus_address: Option<String>,
+    access_log: bool,
 }
 impl ServerBuilder {
     pub fn add_route(mut self, route: impl Into<Route>) -> Self {
@@ -194,6 +196,12 @@ impl ServerBuilder {
     /// Default: [PROMETHEUS_ENDPOINT_ADDRESS].
     pub fn prometheus_address(mut self, addr: String) -> Self {
         self.prometheus_address = Some(addr);
+        self
+    }
+
+    /// Enable/disable the per-request access log (nginx `access_log on/off`). Default: on.
+    pub fn access_log(mut self, enabled: bool) -> Self {
+        self.access_log = enabled;
         self
     }
 
@@ -230,7 +238,8 @@ impl ServerBuilder {
                 .insert(route.path, route_value)
                 .expect("Invalid route");
         }
-        let router = Proxy::new(routes);
+        let mut router = Proxy::new(routes);
+        router.set_access_log(self.access_log);
 
         if let Some(endpoint_address) = self.set_strategy_endpoint {
             let endpoint = SetStrategyEndpoint::service(router.clone(), &endpoint_address);

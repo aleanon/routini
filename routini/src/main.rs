@@ -65,6 +65,10 @@ fn main() -> Result<()> {
         builder = builder.prometheus_address(prometheus_address);
     }
 
+    if let Some(access_log) = config.server.access_log {
+        builder = builder.access_log(access_log);
+    }
+
     if let Some(tls) = &config.proxy.tls {
         builder = builder.tls(tls.to_builder_tls());
     }

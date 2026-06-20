@@ -70,6 +70,8 @@ pub struct Proxy {
     /// cached `Arc<CachedRoute>` with no allocation. Routes never change after build, so entries
     /// never need invalidation — eviction only bounds memory.
     cache: Arc<Cache<Box<str>, Arc<CachedRoute>>>,
+    /// Emit a structured access-log line per request (nginx `access_log on/off`).
+    access_log: bool,
 }
 
 impl Proxy {
@@ -81,7 +83,13 @@ impl Proxy {
         Proxy {
             routes: Arc::new(routes),
             cache: Arc::new(Cache::new(capacity)),
+            access_log: true,
         }
+    }
+
+    /// Enable or disable the per-request access log.
+    pub fn set_access_log(&mut self, enabled: bool) {
+        self.access_log = enabled;
     }
 
     /// Resolve a concrete request path to its (cached) route.
@@ -147,6 +155,10 @@ pub struct ConnectionCTX {
     tried: Vec<SocketAddr>,
     /// Running total of request body bytes seen, for `max_body_size` enforcement.
     body_seen: usize,
+    /// When the request was received, for access-log latency.
+    request_start: Instant,
+    /// Original request path (captured before prefix stripping) for the access log.
+    orig_path: Option<Box<str>>,
 }
 
 #[async_trait::async_trait]
@@ -160,6 +172,8 @@ impl ProxyHttp for Proxy {
             backend: None,
             tried: Vec::new(),
             body_seen: 0,
+            request_start: Instant::now(),
+            orig_path: None,
         }
     }
 
@@ -169,6 +183,9 @@ impl ProxyHttp for Proxy {
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
         let resolved = {
             let path = session.req_header().uri.path();
+            if self.access_log {
+                ctx.orig_path = Some(Box::from(path));
+            }
             self.resolve(path)
         };
 
@@ -394,6 +411,48 @@ impl ProxyHttp for Proxy {
     {
         if let Some(backend) = &ctx.backend {
             backend.metrics.decrement_active_connections();
+        }
+    }
+
+    /// Emit a structured access-log record once the request completes.
+    async fn logging(&self, session: &mut Session, e: Option<&Error>, ctx: &mut Self::CTX) {
+        if !self.access_log {
+            return;
+        }
+
+        let status = session
+            .response_written()
+            .map(|r| r.status.as_u16())
+            .unwrap_or(0);
+        let latency_ms = ctx.request_start.elapsed().as_millis();
+        let bytes_sent = session.body_bytes_sent();
+        let method = session.req_header().method.clone();
+        let client = client_ip(session)
+            .map(|ip| ip.to_string())
+            .unwrap_or_default();
+        let upstream = ctx
+            .backend
+            .as_ref()
+            .map(|b| b.addr.to_string())
+            .unwrap_or_default();
+        let path = ctx
+            .orig_path
+            .as_deref()
+            .unwrap_or_else(|| session.req_header().uri.path());
+
+        if let Some(err) = e {
+            tracing::warn!(
+                target: "routini::access",
+                %client, %method, path, status, latency_ms, bytes_sent, upstream,
+                error = %err,
+                "request failed"
+            );
+        } else {
+            tracing::info!(
+                target: "routini::access",
+                %client, %method, path, status, latency_ms, bytes_sent, upstream,
+                "request"
+            );
         }
     }
 }

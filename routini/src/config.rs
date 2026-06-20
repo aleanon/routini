@@ -75,6 +75,8 @@ impl Config {
 pub struct ServerConfig {
     pub prometheus_address: Option<String>,
     pub set_strategy_endpoint: Option<String>,
+    /// Per-request access log (nginx `access_log on/off`). Defaults to on when omitted.
+    pub access_log: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
