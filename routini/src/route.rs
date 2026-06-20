@@ -3,15 +3,142 @@
 //! [`RouteConfig`] holds everything configurable per route (header rules, etc.). [`RouteRuntime`]
 //! bundles a route's config with its load balancer and is what the proxy stores per route and
 //! caches per concrete request path.
-use std::{net::IpAddr, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    net::IpAddr,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use http::{HeaderName, HeaderValue, header};
 use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::prelude::HttpPeer;
+use pingora::protocols::l4::socket::SocketAddr;
 
-use crate::adaptive_loadbalancer::{AdaptiveLoadBalancer, decision_engine::AdaptiveDecisionEngine};
+use crate::{
+    adaptive_loadbalancer::{AdaptiveLoadBalancer, decision_engine::AdaptiveDecisionEngine},
+    load_balancing::Backend,
+};
 
 pub type SharedLb = Arc<AdaptiveLoadBalancer<AdaptiveDecisionEngine>>;
+
+/// Per-request failover behaviour (nginx `proxy_next_upstream` for connect errors).
+#[derive(Debug, Clone, Copy)]
+pub struct RetryConfig {
+    /// Maximum additional upstream attempts after the first, each on a different backend.
+    pub max_retries: usize,
+    pub retry_on_connect_error: bool,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: 1,
+            retry_on_connect_error: true,
+        }
+    }
+}
+
+/// Passive health checking (nginx `max_fails` / `fail_timeout`): eject a backend after it accrues
+/// `max_fails` connection failures within `fail_timeout`, and restore it once `fail_timeout` elapses.
+#[derive(Debug, Clone, Copy)]
+pub struct PassiveHealthConfig {
+    /// Off by default — routini already runs active health checks; this is opt-in.
+    pub enabled: bool,
+    pub max_fails: u32,
+    pub fail_timeout: Duration,
+}
+
+impl Default for PassiveHealthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_fails: 3,
+            fail_timeout: Duration::from_secs(10),
+        }
+    }
+}
+
+struct FailWindow {
+    count: u32,
+    window_start: Instant,
+}
+
+struct Ejection {
+    backend: Backend,
+    until: Instant,
+}
+
+/// Runtime state for [`PassiveHealthConfig`]: tracks per-backend failure windows and ejections.
+/// Lives in [`RouteRuntime`] (not [`RouteConfig`]) because it carries mutable, shared state.
+pub struct PassiveHealth {
+    config: PassiveHealthConfig,
+    windows: Mutex<HashMap<SocketAddr, FailWindow>>,
+    ejections: Mutex<Vec<Ejection>>,
+}
+
+impl PassiveHealth {
+    pub fn new(config: PassiveHealthConfig) -> Self {
+        Self {
+            config,
+            windows: Mutex::new(HashMap::new()),
+            ejections: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Record a connection failure. Returns `true` when the backend has crossed `max_fails`
+    /// within the window and should be ejected by the caller.
+    pub fn record_failure(&self, backend: &Backend) -> bool {
+        if !self.config.enabled {
+            return false;
+        }
+        let now = Instant::now();
+        let mut windows = self.windows.lock().unwrap();
+        let window = windows
+            .entry(backend.addr.clone())
+            .or_insert(FailWindow { count: 0, window_start: now });
+        if now.duration_since(window.window_start) > self.config.fail_timeout {
+            window.count = 0;
+            window.window_start = now;
+        }
+        window.count += 1;
+        if window.count >= self.config.max_fails {
+            windows.remove(&backend.addr);
+            self.ejections.lock().unwrap().push(Ejection {
+                backend: backend.clone(),
+                until: now + self.config.fail_timeout,
+            });
+            return true;
+        }
+        false
+    }
+
+    /// Clear the failure window for a backend after a successful response.
+    pub fn record_success(&self, backend: &Backend) {
+        if !self.config.enabled {
+            return;
+        }
+        self.windows.lock().unwrap().remove(&backend.addr);
+    }
+
+    /// Return backends whose ejection window has elapsed, so the caller can re-enable them.
+    pub fn take_expired(&self, now: Instant) -> Vec<Backend> {
+        if !self.config.enabled {
+            return Vec::new();
+        }
+        let mut ejections = self.ejections.lock().unwrap();
+        let mut expired = Vec::new();
+        ejections.retain(|e| {
+            if e.until <= now {
+                expired.push(e.backend.clone());
+                false
+            } else {
+                true
+            }
+        });
+        expired
+    }
+}
 
 /// Upstream connection/transfer timeouts, applied to the [`HttpPeer`] per request.
 /// `None` leaves Pingora's default in place. Equivalent to nginx `proxy_connect_timeout`,
@@ -152,6 +279,8 @@ pub struct RouteConfig {
     pub strip_path_prefix: bool,
     pub headers: HeaderRules,
     pub timeouts: TimeoutConfig,
+    pub retry: RetryConfig,
+    pub passive_health: PassiveHealthConfig,
 }
 
 impl Default for RouteConfig {
@@ -160,19 +289,23 @@ impl Default for RouteConfig {
             strip_path_prefix: true,
             headers: HeaderRules::default(),
             timeouts: TimeoutConfig::default(),
+            retry: RetryConfig::default(),
+            passive_health: PassiveHealthConfig::default(),
         }
     }
 }
 
-/// A route's config bundled with its load balancer. Shared via `Arc` and never mutated after build.
+/// A route's config bundled with its load balancer and passive-health state. Shared via `Arc`.
 pub struct RouteRuntime {
     pub lb: SharedLb,
     pub config: RouteConfig,
+    pub health: PassiveHealth,
 }
 
 impl RouteRuntime {
     pub fn new(lb: SharedLb, config: RouteConfig) -> Self {
-        Self { lb, config }
+        let health = PassiveHealth::new(config.passive_health);
+        Self { lb, config, health }
     }
 }
 
@@ -257,6 +390,39 @@ mod tests {
         assert_eq!(peer.options.read_timeout, Some(Duration::from_secs(5)));
         // unset fields are left untouched
         assert_eq!(peer.options.write_timeout, default_write);
+    }
+
+    #[test]
+    fn passive_health_ejects_after_max_fails_then_restores() {
+        let cfg = PassiveHealthConfig {
+            enabled: true,
+            max_fails: 2,
+            fail_timeout: Duration::from_millis(50),
+        };
+        let ph = PassiveHealth::new(cfg);
+        let backend = Backend::new("127.0.0.1:9001").unwrap();
+
+        assert!(!ph.record_failure(&backend), "first failure should not eject");
+        assert!(ph.record_failure(&backend), "second failure should eject");
+
+        // still ejected immediately after
+        assert!(ph.take_expired(Instant::now()).is_empty());
+
+        // after fail_timeout the backend becomes eligible for restore
+        let later = Instant::now() + Duration::from_millis(60);
+        let expired = ph.take_expired(later);
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].addr, backend.addr);
+    }
+
+    #[test]
+    fn passive_health_disabled_never_ejects() {
+        let ph = PassiveHealth::new(PassiveHealthConfig::default()); // enabled = false
+        let backend = Backend::new("127.0.0.1:9001").unwrap();
+        for _ in 0..5 {
+            assert!(!ph.record_failure(&backend));
+        }
+        assert!(ph.take_expired(Instant::now()).is_empty());
     }
 
     #[test]

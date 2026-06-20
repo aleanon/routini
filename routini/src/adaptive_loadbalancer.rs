@@ -50,6 +50,22 @@ impl<D: DecisionEngine> AdaptiveLoadBalancer<D> {
         self.lb.select(key, self.config.max_iterations)
     }
 
+    /// Select a healthy backend whose address is not in `exclude`. Used for per-request failover
+    /// so a retry lands on a different backend than the one that just failed.
+    pub fn select_excluding(
+        &self,
+        exclude: &[pingora::protocols::l4::socket::SocketAddr],
+    ) -> Option<Backend> {
+        self.lb.select_with(&[], self.config.max_iterations, |backend, healthy| {
+            healthy && !exclude.iter().any(|addr| addr == &backend.addr)
+        })
+    }
+
+    /// Manually enable/disable a backend (used by passive health checks to eject/restore).
+    pub fn set_backend_enabled(&self, backend: &Backend, enabled: bool) {
+        self.lb.backends().set_enable(backend, enabled);
+    }
+
     pub async fn update_strategy(&self, new_strategy: Adaptive) -> bool {
         self.lb.update_strategy(new_strategy).await
     }

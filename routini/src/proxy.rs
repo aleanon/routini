@@ -130,6 +130,8 @@ pub struct ConnectionCTX {
     route: Option<Arc<CachedRoute>>,
     upstream_start: Option<Instant>,
     backend: Option<Backend>,
+    /// Backends already attempted this request, so retries pick a different one (failover).
+    tried: Vec<SocketAddr>,
 }
 
 #[async_trait::async_trait]
@@ -141,6 +143,7 @@ impl ProxyHttp for Proxy {
             route: None,
             upstream_start: None,
             backend: None,
+            tried: Vec::new(),
         }
     }
 
@@ -178,13 +181,26 @@ impl ProxyHttp for Proxy {
             retry: RetryType::Decided(false),
         })?;
 
-        let backend = route.runtime.lb.select(&[]).ok_or(Error {
-            context: Some(ImmutStr::Static("No healthy backends available")),
-            cause: None,
-            etype: ErrorType::InternalError,
-            esource: ErrorSource::Internal,
-            retry: RetryType::Decided(true),
-        })?;
+        // Restore any backends whose passive-health ejection window has elapsed.
+        for backend in route.runtime.health.take_expired(Instant::now()) {
+            route.runtime.lb.set_backend_enabled(&backend, true);
+        }
+
+        // Pick a healthy backend we have not already tried this request. A retry (driven by
+        // `fail_to_connect`) re-enters here with the previous backend recorded, so failover lands
+        // on a different upstream. Once exhausted the error is non-retryable.
+        let backend = route
+            .runtime
+            .lb
+            .select_excluding(&ctx.tried)
+            .ok_or(Error {
+                context: Some(ImmutStr::Static("No healthy backends available")),
+                cause: None,
+                etype: ErrorType::InternalError,
+                esource: ErrorSource::Internal,
+                retry: RetryType::Decided(false),
+            })?;
+        ctx.tried.push(backend.addr.clone());
 
         if let Some(stripped_path) = &route.stripped_path {
             session.req_header_mut().set_raw_path(stripped_path)?;
@@ -243,15 +259,44 @@ impl ProxyHttp for Proxy {
         _upstream_response: &mut ResponseHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        if let Some(start) = ctx.upstream_start {
-            let latency = start.elapsed();
-            if let (Some(route), Some(backend)) = (&ctx.route, &ctx.backend) {
+        if let (Some(route), Some(backend)) = (&ctx.route, &ctx.backend) {
+            // A response means the connection succeeded: clear the passive-health failure window.
+            route.runtime.health.record_success(backend);
+
+            if let Some(start) = ctx.upstream_start {
+                let latency = start.elapsed();
                 backend
                     .metrics
                     .record_latency(latency, route.runtime.lb.config.latency_smoothing_factor);
             }
         }
         Ok(())
+    }
+
+    /// On a failed upstream *connection*, record a passive-health failure (ejecting the backend
+    /// once it crosses `max_fails`) and mark the error retryable so `upstream_peer` is re-invoked
+    /// to fail over to another backend, up to `max_retries`.
+    fn fail_to_connect(
+        &self,
+        _session: &mut Session,
+        _peer: &HttpPeer,
+        ctx: &mut Self::CTX,
+        mut e: Box<Error>,
+    ) -> Box<Error> {
+        if let Some(route) = &ctx.route {
+            if let Some(backend) = &ctx.backend {
+                if route.runtime.health.record_failure(backend) {
+                    route.runtime.lb.set_backend_enabled(backend, false);
+                    log::warn!("Passively ejected backend {}", backend.addr);
+                }
+            }
+
+            let retry = route.runtime.config.retry;
+            if retry.retry_on_connect_error && ctx.tried.len() <= retry.max_retries {
+                e.set_retry(true);
+            }
+        }
+        e
     }
     /// This filter is called when the request just established or reused a connection to the upstream
     ///

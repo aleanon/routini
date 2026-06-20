@@ -12,7 +12,9 @@ use serde::Deserialize;
 use crate::{
     adaptive_loadbalancer::options::AdaptiveLbOpt,
     load_balancing::strategy::Adaptive,
-    route::{HeaderRules, HostRewrite, RouteConfig, TimeoutConfig},
+    route::{
+        HeaderRules, HostRewrite, PassiveHealthConfig, RetryConfig, RouteConfig, TimeoutConfig,
+    },
     server_builder::{Route, TlsConfig as BuilderTlsConfig},
 };
 
@@ -112,6 +114,10 @@ pub struct RouteEntry {
     pub headers: HeadersConfig,
     #[serde(default)]
     pub timeouts: TimeoutsConfig,
+    #[serde(default)]
+    pub retry: RetryConfigInput,
+    #[serde(default)]
+    pub passive_health: PassiveHealthInput,
     pub load_balancer: LoadBalancerConfig,
 }
 
@@ -128,6 +134,8 @@ impl RouteEntry {
             strip_path_prefix: self.strip_prefix,
             headers: self.headers.to_rules()?,
             timeouts: self.timeouts.to_timeouts(),
+            retry: self.retry.to_retry(),
+            passive_health: self.passive_health.to_config(),
         };
 
         let route = Route::with_options(&self.path, upstreams, self.load_balancer.to_lb_opt())?
@@ -172,6 +180,50 @@ impl TimeoutsConfig {
             write: self.write_ms.map(Duration::from_millis),
             idle: self.idle_ms.map(Duration::from_millis),
         }
+    }
+}
+
+/// Per-request failover config (nginx `proxy_next_upstream` for connect errors).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RetryConfigInput {
+    pub max_retries: Option<usize>,
+    pub retry_on_connect_error: Option<bool>,
+}
+
+impl RetryConfigInput {
+    fn to_retry(&self) -> RetryConfig {
+        let mut retry = RetryConfig::default();
+        if let Some(max) = self.max_retries {
+            retry.max_retries = max;
+        }
+        if let Some(on_connect) = self.retry_on_connect_error {
+            retry.retry_on_connect_error = on_connect;
+        }
+        retry
+    }
+}
+
+/// Passive health checking config (nginx `max_fails` / `fail_timeout`).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PassiveHealthInput {
+    pub enabled: Option<bool>,
+    pub max_fails: Option<u32>,
+    pub fail_timeout_secs: Option<u64>,
+}
+
+impl PassiveHealthInput {
+    fn to_config(&self) -> PassiveHealthConfig {
+        let mut config = PassiveHealthConfig::default();
+        if let Some(enabled) = self.enabled {
+            config.enabled = enabled;
+        }
+        if let Some(max_fails) = self.max_fails {
+            config.max_fails = max_fails;
+        }
+        if let Some(secs) = self.fail_timeout_secs {
+            config.fail_timeout = Duration::from_secs(secs);
+        }
+        config
     }
 }
 
