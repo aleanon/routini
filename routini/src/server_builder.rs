@@ -67,6 +67,7 @@ pub fn proxy_server(listener: TcpListener) -> ServerBuilder {
         https_redirect: false,
         compression_level: 0,
         reload_config_path: None,
+        request_id: false,
     }
 }
 
@@ -217,6 +218,7 @@ pub struct ServerBuilder {
     https_redirect: bool,
     compression_level: u32,
     reload_config_path: Option<String>,
+    request_id: bool,
 }
 impl ServerBuilder {
     pub fn add_route(mut self, route: impl Into<Route>) -> Self {
@@ -269,6 +271,12 @@ impl ServerBuilder {
     /// still require a restart.
     pub fn reload_on_sighup(mut self, path: String) -> Self {
         self.reload_config_path = Some(path);
+        self
+    }
+
+    /// Generate/propagate an `X-Request-Id` header for request tracing. Default: off.
+    pub fn request_id(mut self, enabled: bool) -> Self {
+        self.request_id = enabled;
         self
     }
 
@@ -351,6 +359,7 @@ impl ServerBuilder {
         router.set_access_log(self.access_log);
         router.set_https_redirect(self.https_redirect);
         router.set_compression_level(self.compression_level);
+        router.set_request_id(self.request_id);
 
         if let Some(path) = self.reload_config_path {
             spawn_reload_watcher(path, Arc::new(registry));

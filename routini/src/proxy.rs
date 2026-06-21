@@ -117,7 +117,16 @@ pub struct Proxy {
     https_redirect: bool,
     /// Downstream response compression level (nginx `gzip`); 0 disables it.
     compression_level: u32,
+    /// Generate/propagate an `X-Request-Id` header for request tracing.
+    request_id: bool,
 }
+
+/// Generate a random 64-bit request id as 16 lowercase hex chars.
+fn generate_request_id() -> String {
+    format!("{:016x}", rand::random::<u64>())
+}
+
+const X_REQUEST_ID: &str = "x-request-id";
 
 impl Proxy {
     pub fn new(routes: Router<RouteValue>) -> Self {
@@ -165,6 +174,7 @@ impl Proxy {
             access_log: true,
             https_redirect: false,
             compression_level: 0,
+            request_id: false,
         }
     }
 
@@ -176,6 +186,11 @@ impl Proxy {
     /// Set the downstream response compression level (0 disables).
     pub fn set_compression_level(&mut self, level: u32) {
         self.compression_level = level;
+    }
+
+    /// Enable `X-Request-Id` generation/propagation.
+    pub fn set_request_id(&mut self, enabled: bool) {
+        self.request_id = enabled;
     }
 
     /// Redirect plain-HTTP requests to the `https://` equivalent.
@@ -298,6 +313,8 @@ pub struct ConnectionCTX {
     /// Held for the request's lifetime to keep the per-IP concurrency count accurate; the count is
     /// decremented when this guard drops at the end of the request.
     conn_guard: Option<pingora_limits::inflight::Guard>,
+    /// The request's `X-Request-Id` (incoming or generated) for upstream/response/log propagation.
+    request_id: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -315,6 +332,7 @@ impl ProxyHttp for Proxy {
             request_start: Instant::now(),
             orig_path: None,
             conn_guard: None,
+            request_id: None,
         }
     }
 
@@ -358,6 +376,18 @@ impl ProxyHttp for Proxy {
                 session.write_response_header(Box::new(resp), true).await?;
                 return Ok(true);
             }
+        }
+
+        // Establish a request id (reuse an incoming one, else generate) for tracing propagation.
+        if self.request_id {
+            let id = session
+                .req_header()
+                .headers
+                .get(X_REQUEST_ID)
+                .and_then(|h| h.to_str().ok())
+                .map(|s| s.to_string())
+                .unwrap_or_else(generate_request_id);
+            ctx.request_id = Some(id);
         }
 
         let resolved = {
@@ -662,6 +692,9 @@ impl ProxyHttp for Proxy {
                 .headers
                 .apply_request(upstream_request, ip, tls);
         }
+        if let Some(id) = &ctx.request_id {
+            let _ = upstream_request.insert_header(X_REQUEST_ID, id);
+        }
         Ok(())
     }
 
@@ -681,6 +714,9 @@ impl ProxyHttp for Proxy {
                         .insert_header(http::header::STRICT_TRANSPORT_SECURITY, hsts);
                 }
             }
+        }
+        if let Some(id) = &ctx.request_id {
+            let _ = upstream_response.insert_header(X_REQUEST_ID, id);
         }
         Ok(())
     }
@@ -805,18 +841,19 @@ impl ProxyHttp for Proxy {
             .orig_path
             .as_deref()
             .unwrap_or_else(|| session.req_header().uri.path());
+        let request_id = ctx.request_id.as_deref().unwrap_or("");
 
         if let Some(err) = e {
             tracing::warn!(
                 target: "routini::access",
-                %client, %method, path, status, latency_ms, bytes_sent, upstream,
+                %client, %method, path, status, latency_ms, bytes_sent, upstream, request_id,
                 error = %err,
                 "request failed"
             );
         } else {
             tracing::info!(
                 target: "routini::access",
-                %client, %method, path, status, latency_ms, bytes_sent, upstream,
+                %client, %method, path, status, latency_ms, bytes_sent, upstream, request_id,
                 "request"
             );
         }

@@ -95,6 +95,10 @@ fn main() -> Result<()> {
         builder = builder.compression_level(level);
     }
 
+    if let Some(request_id) = config.server.request_id {
+        builder = builder.request_id(request_id);
+    }
+
     if let Some(tls) = &config.proxy.tls {
         builder = builder.tls(tls.to_builder_tls());
     }
