@@ -447,28 +447,49 @@ impl Default for RouteConfig {
     }
 }
 
-/// A route's config bundled with its load balancer and shared runtime state (passive health,
-/// rate/connection limiters). Shared via `Arc` and never reconstructed after build.
-pub struct RouteRuntime {
-    pub lb: SharedLb,
+/// The hot-swappable part of a route: its config plus the runtime state derived from it
+/// (passive-health tracker, rate/connection limiters). Replaced atomically on config reload.
+pub struct RouteState {
     pub config: RouteConfig,
     pub health: PassiveHealth,
     pub rate_limiter: Option<RateLimiter>,
     pub conn_limiter: Option<ConnLimiter>,
 }
 
-impl RouteRuntime {
-    pub fn new(lb: SharedLb, config: RouteConfig) -> Self {
+impl RouteState {
+    pub fn new(config: RouteConfig) -> Self {
         let health = PassiveHealth::new(config.passive_health);
         let rate_limiter = config.rate_limit_rps.map(RateLimiter::new);
         let conn_limiter = config.max_connections.map(ConnLimiter::new);
         Self {
-            lb,
             config,
             health,
             rate_limiter,
             conn_limiter,
         }
+    }
+}
+
+/// A route's load balancer plus its hot-swappable [`RouteState`]. The `lb` (backends + strategy)
+/// is fixed for the process lifetime; `state` is read lock-free per request and can be replaced on
+/// SIGHUP config reload via [`RouteRuntime::reload`].
+pub struct RouteRuntime {
+    pub lb: SharedLb,
+    pub state: arc_swap::ArcSwap<RouteState>,
+}
+
+impl RouteRuntime {
+    pub fn new(lb: SharedLb, config: RouteConfig) -> Self {
+        Self {
+            lb,
+            state: arc_swap::ArcSwap::from_pointee(RouteState::new(config)),
+        }
+    }
+
+    /// Atomically replace this route's config-derived state (used by config reload). Limiter and
+    /// passive-health counters reset, matching nginx's "new workers, fresh limit state" reload.
+    pub fn reload(&self, config: RouteConfig) {
+        self.state.store(Arc::new(RouteState::new(config)));
     }
 }
 

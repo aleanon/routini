@@ -2,6 +2,7 @@ pub mod adaptive_loadbalancer;
 pub mod config;
 pub mod load_balancing;
 pub mod proxy;
+pub mod reload;
 pub mod route;
 pub mod server_builder;
 pub mod set_strategy_endpoint;

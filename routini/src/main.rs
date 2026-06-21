@@ -3,7 +3,7 @@ use pingora::server::configuration::ServerConf;
 use routini::{
     server_builder::proxy_server,
     utils::{
-        config_loader::load_config,
+        config_loader::{CONFIG_PATH_ENV, DEFAULT_CONFIG_PATH, load_config_from},
         constants::{
             DEFAULT_LOG_JSON, DEFAULT_LOG_LEVEL_FILTER, DEFAULT_MAX_LOG_AGE_DAYS,
             SET_STRATEGY_ENDPOINT_ADDRESS,
@@ -40,7 +40,9 @@ fn main() -> Result<()> {
     init_tracing_with_config(log_config).expect("Failed to set up tracing");
     color_eyre::install().expect("Failed to install color_eyre");
 
-    let config = load_config()?;
+    let config_path =
+        std::env::var(CONFIG_PATH_ENV).unwrap_or_else(|_| DEFAULT_CONFIG_PATH.to_string());
+    let config = load_config_from(&config_path)?;
     tracing::info!("Loaded configuration: {} route(s)", config.proxy.router.len());
 
     let listener = TcpListener::bind(config.listen_address())?;
@@ -96,6 +98,8 @@ fn main() -> Result<()> {
     if let Some(tls) = &config.proxy.tls {
         builder = builder.tls(tls.to_builder_tls());
     }
+
+    builder = builder.reload_on_sighup(config_path);
 
     builder.build().run_forever();
 }

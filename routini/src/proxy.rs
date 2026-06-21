@@ -28,7 +28,7 @@ use pingora::{
 
 use crate::{
     load_balancing::{Backend, Metrics},
-    route::{RouteAction, RouteRuntime},
+    route::{RouteAction, RouteRuntime, RouteState},
     utils::constants::{DEFAULT_PATH_CACHE_CAPACITY, DEFAULT_PATH_REMAINDER_IDENTIFIER},
 };
 
@@ -261,11 +261,8 @@ impl Proxy {
             })
             .map(|m| {
                 let value = m.value;
-                let stripped_path =
-                    value
-                        .runtime
-                        .config
-                        .strip_path_prefix
+                let strip = value.runtime.state.load().config.strip_path_prefix;
+                let stripped_path = strip
                         .then_some(m)
                         .and_then(|m| {
                             m.params.get(DEFAULT_PATH_REMAINDER_IDENTIFIER).map(|p| {
@@ -285,6 +282,9 @@ impl Proxy {
 pub struct ConnectionCTX {
     /// The route resolved for this request (set in `request_filter`), shared with later filters.
     route: Option<Arc<CachedRoute>>,
+    /// Snapshot of the route's hot-swappable state, loaded once in `request_filter` so every later
+    /// filter sees a consistent config for this request even if a reload happens mid-flight.
+    state: Option<Arc<RouteState>>,
     upstream_start: Option<Instant>,
     backend: Option<Backend>,
     /// Backends already attempted this request, so retries pick a different one (failover).
@@ -307,6 +307,7 @@ impl ProxyHttp for Proxy {
     fn new_ctx(&self) -> Self::CTX {
         ConnectionCTX {
             route: None,
+            state: None,
             upstream_start: None,
             backend: None,
             tried: Vec::new(),
@@ -382,8 +383,11 @@ impl ProxyHttp for Proxy {
             }
         };
 
+        // Snapshot the route's hot-swappable state once; every later filter reuses this via ctx.
+        let state = cached.runtime.state.load_full();
+
         // Access control: IP allow/deny then HTTP Basic auth.
-        if let Some(access) = &cached.runtime.config.access {
+        if let Some(access) = &state.config.access {
             if let Some(ip) = client_ip(session) {
                 if !access.ip_allowed(ip) {
                     session.respond_error(StatusCode::FORBIDDEN.as_u16()).await?;
@@ -419,7 +423,7 @@ impl ProxyHttp for Proxy {
         }
 
         // Redirect / return actions short-circuit without proxying.
-        if let Some(action) = &cached.runtime.config.action {
+        if let Some(action) = &state.config.action {
             match action {
                 RouteAction::Redirect { status, location } => {
                     let location = redirect_location(location, session);
@@ -449,7 +453,7 @@ impl ProxyHttp for Proxy {
 
         // Per-client-IP rate and concurrency limits (nginx limit_req / limit_conn).
         let client = client_ip(session);
-        if let (Some(limiter), Some(ip)) = (&cached.runtime.rate_limiter, client) {
+        if let (Some(limiter), Some(ip)) = (&state.rate_limiter, client) {
             if limiter.over_limit(&ip) {
                 session
                     .respond_error(StatusCode::TOO_MANY_REQUESTS.as_u16())
@@ -457,7 +461,7 @@ impl ProxyHttp for Proxy {
                 return Ok(true);
             }
         }
-        if let (Some(limiter), Some(ip)) = (&cached.runtime.conn_limiter, client) {
+        if let (Some(limiter), Some(ip)) = (&state.conn_limiter, client) {
             match limiter.acquire(&ip) {
                 Ok(guard) => ctx.conn_guard = Some(guard),
                 Err(()) => {
@@ -471,7 +475,7 @@ impl ProxyHttp for Proxy {
 
         // Reject oversized bodies early via Content-Length (streaming bodies are guarded in
         // `request_body_filter`).
-        if let Some(max) = cached.runtime.config.max_body_size {
+        if let Some(max) = state.config.max_body_size {
             if content_length(session).is_some_and(|len| len > max) {
                 session
                     .respond_error(StatusCode::PAYLOAD_TOO_LARGE.as_u16())
@@ -480,6 +484,7 @@ impl ProxyHttp for Proxy {
             }
         }
 
+        ctx.state = Some(state);
         ctx.route = Some(cached);
         Ok(false)
     }
@@ -491,7 +496,7 @@ impl ProxyHttp for Proxy {
         _end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        let max = ctx.route.as_ref().and_then(|r| r.runtime.config.max_body_size);
+        let max = ctx.state.as_ref().and_then(|s| s.config.max_body_size);
         if let Some(max) = max {
             if let Some(chunk) = body.as_ref() {
                 ctx.body_seen = ctx.body_seen.saturating_add(chunk.len());
@@ -509,9 +514,9 @@ impl ProxyHttp for Proxy {
     /// Enable the shared response cache for cacheable (GET/HEAD) requests on cache-enabled routes.
     fn request_cache_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<()> {
         let enabled = ctx
-            .route
+            .state
             .as_ref()
-            .and_then(|r| r.runtime.config.cache.as_ref())
+            .and_then(|s| s.config.cache.as_ref())
             .is_some_and(|c| c.enabled);
         if !enabled {
             return Ok(());
@@ -548,9 +553,9 @@ impl ProxyHttp for Proxy {
 
         if resp.status == StatusCode::OK {
             if let Some(ttl) = ctx
-                .route
+                .state
                 .as_ref()
-                .and_then(|r| r.runtime.config.cache.as_ref())
+                .and_then(|s| s.config.cache.as_ref())
                 .map(|c| c.ttl)
             {
                 let now = SystemTime::now();
@@ -578,10 +583,13 @@ impl ProxyHttp for Proxy {
             esource: ErrorSource::Internal,
             retry: RetryType::Decided(false),
         })?;
+        let state = ctx.state.clone();
 
         // Restore any backends whose passive-health ejection window has elapsed.
-        for backend in route.runtime.health.take_expired(Instant::now()) {
-            route.runtime.lb.set_backend_enabled(&backend, true);
+        if let Some(state) = &state {
+            for backend in state.health.take_expired(Instant::now()) {
+                route.runtime.lb.set_backend_enabled(&backend, true);
+            }
         }
 
         // Pick a healthy backend we have not already tried this request. A retry (driven by
@@ -604,8 +612,9 @@ impl ProxyHttp for Proxy {
             session.req_header_mut().set_raw_path(stripped_path)?;
         }
 
-        let tls = &route.runtime.config.upstream_tls;
-        let mut peer = if tls.enabled {
+        let tls = state.as_ref().map(|s| &s.config.upstream_tls);
+        let mut peer = if tls.is_some_and(|t| t.enabled) {
+            let tls = tls.unwrap();
             // Build a fresh HTTPS peer (sni + verification). Per-request cost is acceptable since
             // TLS upstreams are not the throughput-critical path; plain HTTP keeps the cached peer.
             let sni = tls.sni.clone().unwrap_or_default();
@@ -623,12 +632,14 @@ impl ProxyHttp for Proxy {
             }
         };
 
-        if tls.h2 {
+        if tls.is_some_and(|t| t.h2) {
             // Prefer HTTP/2 (fall back to HTTP/1.1); over TLS this advertises h2 via ALPN.
             peer.options.set_http_version(2, 1);
         }
 
-        route.runtime.config.timeouts.apply(&mut peer);
+        if let Some(state) = &state {
+            state.config.timeouts.apply(&mut peer);
+        }
 
         ctx.backend = Some(backend);
 
@@ -643,11 +654,10 @@ impl ProxyHttp for Proxy {
     ) -> Result<()> {
         ctx.upstream_start = Some(Instant::now());
 
-        if let Some(route) = &ctx.route {
+        if let Some(state) = &ctx.state {
             let ip = client_ip(session);
             let tls = client_is_tls(session);
-            route
-                .runtime
+            state
                 .config
                 .headers
                 .apply_request(upstream_request, ip, tls);
@@ -661,11 +671,11 @@ impl ProxyHttp for Proxy {
         upstream_response: &mut ResponseHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        if let Some(route) = &ctx.route {
-            route.runtime.config.headers.apply_response(upstream_response);
+        if let Some(state) = &ctx.state {
+            state.config.headers.apply_response(upstream_response);
 
             // HSTS is only meaningful over HTTPS, so add it only for TLS-terminated requests.
-            if let Some(hsts) = &route.runtime.config.hsts {
+            if let Some(hsts) = &state.config.hsts {
                 if client_is_tls(session) {
                     let _ = upstream_response
                         .insert_header(http::header::STRICT_TRANSPORT_SECURITY, hsts);
@@ -681,9 +691,9 @@ impl ProxyHttp for Proxy {
         _upstream_response: &mut ResponseHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        if let (Some(route), Some(backend)) = (&ctx.route, &ctx.backend) {
+        if let (Some(route), Some(state), Some(backend)) = (&ctx.route, &ctx.state, &ctx.backend) {
             // A response means the connection succeeded: clear the passive-health failure window.
-            route.runtime.health.record_success(backend);
+            state.health.record_success(backend);
 
             if let Some(start) = ctx.upstream_start {
                 let latency = start.elapsed();
@@ -705,15 +715,15 @@ impl ProxyHttp for Proxy {
         ctx: &mut Self::CTX,
         mut e: Box<Error>,
     ) -> Box<Error> {
-        if let Some(route) = &ctx.route {
+        if let (Some(route), Some(state)) = (&ctx.route, &ctx.state) {
             if let Some(backend) = &ctx.backend {
-                if route.runtime.health.record_failure(backend) {
+                if state.health.record_failure(backend) {
                     route.runtime.lb.set_backend_enabled(backend, false);
                     log::warn!("Passively ejected backend {}", backend.addr);
                 }
             }
 
-            let retry = route.runtime.config.retry;
+            let retry = state.config.retry;
             if retry.retry_on_connect_error && ctx.tried.len() <= retry.max_retries {
                 e.set_retry(true);
             }
@@ -885,7 +895,7 @@ mod tests {
 
         assert!(result.is_ok());
         let (route_value, stripped_path) = result.unwrap();
-        assert!(route_value.runtime.config.strip_path_prefix);
+        assert!(route_value.runtime.state.load().config.strip_path_prefix);
         assert_eq!(stripped_path, Some("/login".to_string()));
     }
 
@@ -901,7 +911,7 @@ mod tests {
 
         assert!(result.is_ok());
         let (route_value, stripped_path) = result.unwrap();
-        assert!(route_value.runtime.config.strip_path_prefix);
+        assert!(route_value.runtime.state.load().config.strip_path_prefix);
         assert_eq!(stripped_path, Some("/users/123/profile".to_string()));
     }
 
@@ -944,7 +954,7 @@ mod tests {
         let result = proxy.route("/auth/logout");
         assert!(result.is_ok());
         let (route_value, stripped) = result.unwrap();
-        assert!(route_value.runtime.config.strip_path_prefix);
+        assert!(route_value.runtime.state.load().config.strip_path_prefix);
         assert_eq!(stripped, Some("/logout".to_string()));
     }
 

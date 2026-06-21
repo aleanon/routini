@@ -23,6 +23,7 @@ use crate::{
     },
     load_balancing::{Backend, Backends, discovery::Static, strategy::Adaptive},
     proxy::{Proxy, RouteValue},
+    reload::{RouteRegistry, spawn_reload_watcher},
     route::RouteRuntime,
     set_strategy_endpoint::SetStrategyEndpoint,
     utils::constants::{
@@ -65,6 +66,7 @@ pub fn proxy_server(listener: TcpListener) -> ServerBuilder {
         access_log: true,
         https_redirect: false,
         compression_level: 0,
+        reload_config_path: None,
     }
 }
 
@@ -214,6 +216,7 @@ pub struct ServerBuilder {
     access_log: bool,
     https_redirect: bool,
     compression_level: u32,
+    reload_config_path: Option<String>,
 }
 impl ServerBuilder {
     pub fn add_route(mut self, route: impl Into<Route>) -> Self {
@@ -262,6 +265,13 @@ impl ServerBuilder {
         self
     }
 
+    /// Reload per-route config from `path` on `SIGHUP` (nginx `-s reload`). Structural changes
+    /// still require a restart.
+    pub fn reload_on_sighup(mut self, path: String) -> Self {
+        self.reload_config_path = Some(path);
+        self
+    }
+
     pub fn build(self) -> Server {
         assert!(!self.routes.is_empty(), "requires at least one route");
         // Use a caller-provided ServerConf as-is (it carries the configured tuning); otherwise fall
@@ -276,6 +286,7 @@ impl ServerBuilder {
         let mut default_router = Router::new();
         let mut default_regex: Vec<(Regex, RouteValue)> = Vec::new();
         let mut vhost_routers: HashMap<String, Router<RouteValue>> = HashMap::new();
+        let mut registry: RouteRegistry = HashMap::new();
         for route in self.routes {
             let lb_options = route.lb_options;
 
@@ -295,6 +306,17 @@ impl ServerBuilder {
             let route_value = RouteValue {
                 runtime: Arc::new(RouteRuntime::new(task, route.route_config)),
             };
+
+            // Register the runtime so SIGHUP reload can target it (key mirrors RouteEntry::route_key).
+            let host_key = route
+                .host
+                .as_deref()
+                .map(|h| h.to_ascii_lowercase())
+                .unwrap_or_default();
+            registry.insert(
+                (host_key, route.is_regex, route.path.clone()),
+                route_value.runtime.clone(),
+            );
 
             if route.is_regex {
                 tracing::info!("Adding regex route: {}", route.path);
@@ -329,6 +351,10 @@ impl ServerBuilder {
         router.set_access_log(self.access_log);
         router.set_https_redirect(self.https_redirect);
         router.set_compression_level(self.compression_level);
+
+        if let Some(path) = self.reload_config_path {
+            spawn_reload_watcher(path, Arc::new(registry));
+        }
 
         if let Some(endpoint_address) = self.set_strategy_endpoint {
             let endpoint = SetStrategyEndpoint::service(router.clone(), &endpoint_address);

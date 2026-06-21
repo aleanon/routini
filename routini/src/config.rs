@@ -197,29 +197,13 @@ impl RouteEntry {
             .map(|u| (u.address.clone(), u.weight))
             .collect::<Vec<_>>();
 
-        let action = self.action.as_ref().map(ActionInput::to_action);
+        let config = self.route_config()?;
 
         // Redirect/return routes never proxy, but Route requires at least one backend; inject an
         // unused placeholder so such routes can be declared without an upstream.
-        if upstreams.is_empty() && action.is_some() {
+        if upstreams.is_empty() && config.action.is_some() {
             upstreams.push(("127.0.0.1:1".to_string(), 1));
         }
-
-        let config = RouteConfig {
-            strip_path_prefix: self.strip_prefix,
-            headers: self.headers.to_rules()?,
-            timeouts: self.timeouts.to_timeouts(),
-            retry: self.retry.to_retry(),
-            passive_health: self.passive_health.to_config(),
-            max_body_size: self.max_body_size,
-            upstream_tls: self.upstream_tls.to_upstream_tls(),
-            hsts: self.hsts.clone(),
-            rate_limit_rps: self.rate_limit_rps,
-            max_connections: self.max_connections,
-            action,
-            cache: self.cache.as_ref().map(CacheInput::to_cache),
-            access: self.access.as_ref().map(AccessInput::to_access).transpose()?,
-        };
 
         let lb_opt = self.load_balancer.to_lb_opt();
         let built = if self.regex {
@@ -232,6 +216,42 @@ impl RouteEntry {
             route = route.host(host.clone());
         }
         Ok(route)
+    }
+
+    /// Build just the per-route runtime config (no backends/LB). Used for hot reload.
+    pub fn route_config(&self) -> Result<RouteConfig> {
+        Ok(RouteConfig {
+            strip_path_prefix: self.strip_prefix,
+            headers: self.headers.to_rules()?,
+            timeouts: self.timeouts.to_timeouts(),
+            retry: self.retry.to_retry(),
+            passive_health: self.passive_health.to_config(),
+            max_body_size: self.max_body_size,
+            upstream_tls: self.upstream_tls.to_upstream_tls(),
+            hsts: self.hsts.clone(),
+            rate_limit_rps: self.rate_limit_rps,
+            max_connections: self.max_connections,
+            action: self.action.as_ref().map(ActionInput::to_action),
+            cache: self.cache.as_ref().map(CacheInput::to_cache),
+            access: self.access.as_ref().map(AccessInput::to_access).transpose()?,
+        })
+    }
+
+    /// Stable identity for matching a config entry to its live route at reload time:
+    /// `(lowercased host, is_regex, transformed path)`.
+    pub fn route_key(&self) -> (String, bool, String) {
+        let host = self
+            .host
+            .as_deref()
+            .map(|h| h.to_ascii_lowercase())
+            .unwrap_or_default();
+        let path = if self.regex {
+            self.path.clone()
+        } else {
+            self.path
+                .replacen('*', crate::utils::constants::DEFAULT_WILDCARD_IDENTIFIER, 1)
+        };
+        (host, self.regex, path)
     }
 }
 
