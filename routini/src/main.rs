@@ -99,6 +99,10 @@ fn main() -> Result<()> {
         builder = builder.request_id(request_id);
     }
 
+    if !config.server.error_pages.is_empty() {
+        builder = builder.error_pages(config.server.error_pages.clone());
+    }
+
     if let Some(tls) = &config.proxy.tls {
         builder = builder.tls(tls.to_builder_tls());
     }

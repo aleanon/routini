@@ -105,6 +105,9 @@ pub struct ServerConfig {
     pub compression_level: Option<u32>,
     /// Generate/propagate an `X-Request-Id` header for tracing. Defaults to off.
     pub request_id: Option<bool>,
+    /// Custom error-page bodies keyed by status code (nginx `error_page`).
+    #[serde(default)]
+    pub error_pages: HashMap<u16, String>,
     /// Tokio worker threads (nginx `worker_processes`). Omitted = Pingora default.
     pub worker_threads: Option<usize>,
     /// Upstream keepalive connection pool size. Omitted = 200000.

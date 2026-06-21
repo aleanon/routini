@@ -68,6 +68,7 @@ pub fn proxy_server(listener: TcpListener) -> ServerBuilder {
         compression_level: 0,
         reload_config_path: None,
         request_id: false,
+        error_pages: HashMap::new(),
     }
 }
 
@@ -219,6 +220,7 @@ pub struct ServerBuilder {
     compression_level: u32,
     reload_config_path: Option<String>,
     request_id: bool,
+    error_pages: HashMap<u16, String>,
 }
 impl ServerBuilder {
     pub fn add_route(mut self, route: impl Into<Route>) -> Self {
@@ -277,6 +279,12 @@ impl ServerBuilder {
     /// Generate/propagate an `X-Request-Id` header for request tracing. Default: off.
     pub fn request_id(mut self, enabled: bool) -> Self {
         self.request_id = enabled;
+        self
+    }
+
+    /// Custom error-page bodies keyed by status code (nginx `error_page`).
+    pub fn error_pages(mut self, pages: HashMap<u16, String>) -> Self {
+        self.error_pages = pages;
         self
     }
 
@@ -360,6 +368,7 @@ impl ServerBuilder {
         router.set_https_redirect(self.https_redirect);
         router.set_compression_level(self.compression_level);
         router.set_request_id(self.request_id);
+        router.set_error_pages(self.error_pages);
 
         if let Some(path) = self.reload_config_path {
             spawn_reload_watcher(path, Arc::new(registry));

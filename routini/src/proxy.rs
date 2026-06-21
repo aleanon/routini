@@ -23,8 +23,9 @@ use pingora::{
     http::{RequestHeader, ResponseHeader},
     prelude::HttpPeer,
     protocols::{Digest, l4::socket::SocketAddr},
-    proxy::{ProxyHttp, Session},
+    proxy::{FailToProxy, ProxyHttp, Session},
 };
+use std::collections::HashMap;
 
 use crate::{
     load_balancing::{Backend, Metrics},
@@ -119,6 +120,20 @@ pub struct Proxy {
     compression_level: u32,
     /// Generate/propagate an `X-Request-Id` header for request tracing.
     request_id: bool,
+    /// Custom error-page bodies keyed by status code (nginx `error_page`).
+    error_pages: Arc<HashMap<u16, String>>,
+}
+
+/// Map a fatal proxy error to the HTTP status to return (0 = downstream gone, do not respond).
+fn error_to_status(e: &Error) -> u16 {
+    match e.etype() {
+        ErrorType::HTTPStatus(code) => *code,
+        _ => match e.esource() {
+            ErrorSource::Upstream => 502,
+            ErrorSource::Downstream => 0,
+            _ => 500,
+        },
+    }
 }
 
 /// Generate a random 64-bit request id as 16 lowercase hex chars.
@@ -175,6 +190,28 @@ impl Proxy {
             https_redirect: false,
             compression_level: 0,
             request_id: false,
+            error_pages: Arc::new(HashMap::new()),
+        }
+    }
+
+    /// Set custom error-page bodies keyed by status code.
+    pub fn set_error_pages(&mut self, pages: HashMap<u16, String>) {
+        self.error_pages = Arc::new(pages);
+    }
+
+    /// Write a status response, using a configured custom error page when one exists.
+    async fn write_status(&self, session: &mut Session, code: u16) -> Result<()> {
+        match self.error_pages.get(&code) {
+            Some(body) => {
+                let bytes = Bytes::copy_from_slice(body.as_bytes());
+                let mut resp = ResponseHeader::build(code, None)?;
+                resp.insert_header(http::header::CONTENT_LENGTH, bytes.len().to_string())?;
+                resp.insert_header(http::header::CONTENT_TYPE, "text/html; charset=utf-8")?;
+                session.write_response_header(Box::new(resp), false).await?;
+                session.write_response_body(Some(bytes), true).await?;
+                Ok(())
+            }
+            None => session.respond_error(code).await,
         }
     }
 
@@ -408,7 +445,7 @@ impl ProxyHttp for Proxy {
         let cached = match resolved {
             Ok(cached) => cached,
             Err(_) => {
-                session.respond_error(StatusCode::NOT_FOUND.as_u16()).await?;
+                self.write_status(session, StatusCode::NOT_FOUND.as_u16()).await?;
                 return Ok(true);
             }
         };
@@ -420,12 +457,12 @@ impl ProxyHttp for Proxy {
         if let Some(access) = &state.config.access {
             if let Some(ip) = client_ip(session) {
                 if !access.ip_allowed(ip) {
-                    session.respond_error(StatusCode::FORBIDDEN.as_u16()).await?;
+                    self.write_status(session, StatusCode::FORBIDDEN.as_u16()).await?;
                     return Ok(true);
                 }
             } else if !access.allow.is_empty() {
                 // An allow-list is set but we cannot determine the client IP: deny.
-                session.respond_error(StatusCode::FORBIDDEN.as_u16()).await?;
+                self.write_status(session, StatusCode::FORBIDDEN.as_u16()).await?;
                 return Ok(true);
             }
 
@@ -485,8 +522,7 @@ impl ProxyHttp for Proxy {
         let client = client_ip(session);
         if let (Some(limiter), Some(ip)) = (&state.rate_limiter, client) {
             if limiter.over_limit(&ip) {
-                session
-                    .respond_error(StatusCode::TOO_MANY_REQUESTS.as_u16())
+                self.write_status(session, StatusCode::TOO_MANY_REQUESTS.as_u16())
                     .await?;
                 return Ok(true);
             }
@@ -495,8 +531,7 @@ impl ProxyHttp for Proxy {
             match limiter.acquire(&ip) {
                 Ok(guard) => ctx.conn_guard = Some(guard),
                 Err(()) => {
-                    session
-                        .respond_error(StatusCode::TOO_MANY_REQUESTS.as_u16())
+                    self.write_status(session, StatusCode::TOO_MANY_REQUESTS.as_u16())
                         .await?;
                     return Ok(true);
                 }
@@ -507,8 +542,7 @@ impl ProxyHttp for Proxy {
         // `request_body_filter`).
         if let Some(max) = state.config.max_body_size {
             if content_length(session).is_some_and(|len| len > max) {
-                session
-                    .respond_error(StatusCode::PAYLOAD_TOO_LARGE.as_u16())
+                self.write_status(session, StatusCode::PAYLOAD_TOO_LARGE.as_u16())
                     .await?;
                 return Ok(true);
             }
@@ -765,6 +799,28 @@ impl ProxyHttp for Proxy {
             }
         }
         e
+    }
+
+    /// Serve a custom error page (when configured) for fatal proxy errors, e.g. no healthy backend.
+    async fn fail_to_proxy(
+        &self,
+        session: &mut Session,
+        e: &Error,
+        _ctx: &mut Self::CTX,
+    ) -> FailToProxy
+    where
+        Self::CTX: Send + Sync,
+    {
+        let code = error_to_status(e);
+        if code > 0 {
+            if let Err(err) = self.write_status(session, code).await {
+                log::error!("failed to send error response to downstream: {err}");
+            }
+        }
+        FailToProxy {
+            error_code: code,
+            can_reuse_downstream: false,
+        }
     }
     /// This filter is called when the request just established or reused a connection to the upstream
     ///
