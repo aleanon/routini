@@ -3,21 +3,38 @@
 //! The shapes here mirror `config.json` and convert into the builder types in
 //! [`crate::server_builder`], so `main` can construct the whole server from a file instead of
 //! hard-coded values.
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, net::IpAddr, time::Duration};
 
+use base64::prelude::{BASE64_STANDARD, Engine};
 use color_eyre::eyre::{Result, WrapErr};
 use http::{HeaderName, HeaderValue};
+use ipnet::IpNet;
 use serde::Deserialize;
 
 use crate::{
     adaptive_loadbalancer::options::AdaptiveLbOpt,
     load_balancing::strategy::Adaptive,
     route::{
-        CacheConfig, HeaderRules, HostRewrite, PassiveHealthConfig, RetryConfig, RouteAction,
-        RouteConfig, TimeoutConfig, UpstreamTls,
+        AccessControl, CacheConfig, HeaderRules, HostRewrite, PassiveHealthConfig, RetryConfig,
+        RouteAction, RouteConfig, TimeoutConfig, UpstreamTls,
     },
     server_builder::{Route, TlsConfig as BuilderTlsConfig},
 };
+
+/// Parse a CIDR network, or a bare IP address as a host network.
+fn parse_net(value: &str) -> Result<IpNet> {
+    if let Ok(net) = value.parse::<IpNet>() {
+        return Ok(net);
+    }
+    let ip: IpAddr = value
+        .parse()
+        .wrap_err_with(|| format!("Invalid IP/CIDR '{value}'"))?;
+    Ok(IpNet::from(ip))
+}
+
+fn parse_nets(values: &[String]) -> Result<Vec<IpNet>> {
+    values.iter().map(|v| parse_net(v)).collect()
+}
 
 fn default_redirect_status() -> u16 {
     301
@@ -128,6 +145,8 @@ pub struct RouteEntry {
     pub action: Option<ActionInput>,
     /// Response caching (nginx `proxy_cache`).
     pub cache: Option<CacheInput>,
+    /// IP allow/deny + Basic auth (nginx `allow`/`deny`/`auth_basic`).
+    pub access: Option<AccessInput>,
     #[serde(default = "default_true")]
     pub strip_prefix: bool,
     #[serde(default)]
@@ -181,6 +200,7 @@ impl RouteEntry {
             max_connections: self.max_connections,
             action,
             cache: self.cache.as_ref().map(CacheInput::to_cache),
+            access: self.access.as_ref().map(AccessInput::to_access).transpose()?,
         };
 
         let lb_opt = self.load_balancer.to_lb_opt();
@@ -194,6 +214,34 @@ impl RouteEntry {
             route = route.host(host.clone());
         }
         Ok(route)
+    }
+}
+
+/// Access control config (nginx `allow`/`deny`/`auth_basic`).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AccessInput {
+    #[serde(default)]
+    pub allow: Vec<String>,
+    #[serde(default)]
+    pub deny: Vec<String>,
+    pub basic_auth_realm: Option<String>,
+    /// Accepted `user:password` credentials.
+    #[serde(default)]
+    pub basic_auth: Vec<String>,
+}
+
+impl AccessInput {
+    fn to_access(&self) -> Result<AccessControl> {
+        Ok(AccessControl {
+            allow: parse_nets(&self.allow)?,
+            deny: parse_nets(&self.deny)?,
+            basic_auth_realm: self.basic_auth_realm.clone(),
+            basic_auth: self
+                .basic_auth
+                .iter()
+                .map(|cred| BASE64_STANDARD.encode(cred))
+                .collect(),
+        })
     }
 }
 

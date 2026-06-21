@@ -382,6 +382,42 @@ impl ProxyHttp for Proxy {
             }
         };
 
+        // Access control: IP allow/deny then HTTP Basic auth.
+        if let Some(access) = &cached.runtime.config.access {
+            if let Some(ip) = client_ip(session) {
+                if !access.ip_allowed(ip) {
+                    session.respond_error(StatusCode::FORBIDDEN.as_u16()).await?;
+                    return Ok(true);
+                }
+            } else if !access.allow.is_empty() {
+                // An allow-list is set but we cannot determine the client IP: deny.
+                session.respond_error(StatusCode::FORBIDDEN.as_u16()).await?;
+                return Ok(true);
+            }
+
+            if access.requires_auth() {
+                let authorized = {
+                    let auth = session
+                        .req_header()
+                        .headers
+                        .get(http::header::AUTHORIZATION)
+                        .and_then(|h| h.to_str().ok());
+                    access.auth_ok(auth)
+                };
+                if !authorized {
+                    let realm = access.basic_auth_realm.as_deref().unwrap_or("Restricted");
+                    let mut resp = ResponseHeader::build(StatusCode::UNAUTHORIZED.as_u16(), None)?;
+                    resp.insert_header(
+                        http::header::WWW_AUTHENTICATE,
+                        format!("Basic realm=\"{realm}\""),
+                    )?;
+                    resp.insert_header(http::header::CONTENT_LENGTH, "0")?;
+                    session.write_response_header(Box::new(resp), true).await?;
+                    return Ok(true);
+                }
+            }
+        }
+
         // Redirect / return actions short-circuit without proxying.
         if let Some(action) = &cached.runtime.config.action {
             match action {

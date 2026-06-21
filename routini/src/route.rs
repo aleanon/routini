@@ -4,11 +4,13 @@
 //! bundles a route's config with its load balancer and is what the proxy stores per route and
 //! caches per concrete request path.
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::IpAddr,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+
+use ipnet::IpNet;
 
 use http::{HeaderName, HeaderValue, header};
 use pingora::http::{RequestHeader, ResponseHeader};
@@ -57,6 +59,46 @@ impl Default for PassiveHealthConfig {
             enabled: false,
             max_fails: 3,
             fail_timeout: Duration::from_secs(10),
+        }
+    }
+}
+
+/// IP allow/deny and HTTP Basic auth for a route (nginx `allow`/`deny`, `auth_basic`).
+#[derive(Debug, Clone, Default)]
+pub struct AccessControl {
+    /// If non-empty, only IPs within these networks are permitted (allow-list).
+    pub allow: Vec<IpNet>,
+    /// IPs within these networks are rejected (takes precedence over `allow`).
+    pub deny: Vec<IpNet>,
+    pub basic_auth_realm: Option<String>,
+    /// Accepted credentials as base64(`user:password`) tokens. Empty = no auth required.
+    pub basic_auth: HashSet<String>,
+}
+
+impl AccessControl {
+    /// Whether `ip` passes the deny-then-allow IP rules.
+    pub fn ip_allowed(&self, ip: IpAddr) -> bool {
+        if self.deny.iter().any(|net| net.contains(&ip)) {
+            return false;
+        }
+        if !self.allow.is_empty() && !self.allow.iter().any(|net| net.contains(&ip)) {
+            return false;
+        }
+        true
+    }
+
+    pub fn requires_auth(&self) -> bool {
+        !self.basic_auth.is_empty()
+    }
+
+    /// Validate an `Authorization` header value against the configured Basic credentials.
+    pub fn auth_ok(&self, authorization: Option<&str>) -> bool {
+        if self.basic_auth.is_empty() {
+            return true;
+        }
+        match authorization.and_then(|h| h.strip_prefix("Basic ")) {
+            Some(token) => self.basic_auth.contains(token.trim()),
+            None => false,
         }
     }
 }
@@ -381,6 +423,8 @@ pub struct RouteConfig {
     pub action: Option<RouteAction>,
     /// Response caching (nginx `proxy_cache`). `None` = no caching.
     pub cache: Option<CacheConfig>,
+    /// IP allow/deny + Basic auth (nginx `allow`/`deny`/`auth_basic`). `None` = open.
+    pub access: Option<AccessControl>,
 }
 
 impl Default for RouteConfig {
@@ -398,6 +442,7 @@ impl Default for RouteConfig {
             max_connections: None,
             action: None,
             cache: None,
+            access: None,
         }
     }
 }
@@ -531,6 +576,25 @@ mod tests {
         let expired = ph.take_expired(later);
         assert_eq!(expired.len(), 1);
         assert_eq!(expired[0].addr, backend.addr);
+    }
+
+    #[test]
+    fn access_control_ip_and_basic_auth() {
+        let ac = AccessControl {
+            allow: vec!["10.0.0.0/8".parse().unwrap()],
+            deny: vec!["10.1.2.3".parse::<IpAddr>().unwrap().into()],
+            basic_auth: ["dXNlcjpwYXNz".to_string()].into_iter().collect(), // base64("user:pass")
+            ..Default::default()
+        };
+
+        assert!(ac.ip_allowed("10.5.5.5".parse().unwrap()), "in allow net");
+        assert!(!ac.ip_allowed("10.1.2.3".parse().unwrap()), "explicitly denied");
+        assert!(!ac.ip_allowed("192.168.0.1".parse().unwrap()), "outside allow net");
+
+        assert!(ac.requires_auth());
+        assert!(ac.auth_ok(Some("Basic dXNlcjpwYXNz")));
+        assert!(!ac.auth_ok(Some("Basic d3Jvbmc=")));
+        assert!(!ac.auth_ok(None));
     }
 
     #[test]
