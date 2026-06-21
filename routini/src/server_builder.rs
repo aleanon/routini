@@ -264,8 +264,13 @@ impl ServerBuilder {
 
     pub fn build(self) -> Server {
         assert!(!self.routes.is_empty(), "requires at least one route");
-        let mut server_config = self.server_config.unwrap_or(ServerConf::default());
-        server_config.upstream_keepalive_pool_size = 200000;
+        // Use a caller-provided ServerConf as-is (it carries the configured tuning); otherwise fall
+        // back to defaults with an aggressive upstream keepalive pool.
+        let server_config = self.server_config.unwrap_or_else(|| {
+            let mut config = ServerConf::default();
+            config.upstream_keepalive_pool_size = 200000;
+            config
+        });
         let mut server = Server::new_with_opt_and_conf(None, server_config);
 
         let mut default_router = Router::new();

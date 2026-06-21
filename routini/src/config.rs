@@ -103,6 +103,24 @@ pub struct ServerConfig {
     pub https_redirect: Option<bool>,
     /// Downstream response compression level (nginx `gzip`); 0/omitted disables.
     pub compression_level: Option<u32>,
+    /// Tokio worker threads (nginx `worker_processes`). Omitted = Pingora default.
+    pub worker_threads: Option<usize>,
+    /// Upstream keepalive connection pool size. Omitted = 200000.
+    pub upstream_keepalive_pool_size: Option<usize>,
+    /// Graceful-shutdown grace period (seconds) for in-flight requests.
+    pub grace_period_seconds: Option<u64>,
+    /// Graceful-shutdown hard timeout (seconds).
+    pub graceful_shutdown_timeout_seconds: Option<u64>,
+}
+
+impl ServerConfig {
+    /// Whether any server-level runtime tuning was provided.
+    pub fn has_runtime_tuning(&self) -> bool {
+        self.worker_threads.is_some()
+            || self.upstream_keepalive_pool_size.is_some()
+            || self.grace_period_seconds.is_some()
+            || self.graceful_shutdown_timeout_seconds.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

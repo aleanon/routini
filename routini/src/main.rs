@@ -1,4 +1,5 @@
 use color_eyre::eyre::{Result, eyre};
+use pingora::server::configuration::ServerConf;
 use routini::{
     server_builder::proxy_server,
     utils::{
@@ -50,6 +51,21 @@ fn main() -> Result<()> {
     }
 
     let mut builder = proxy_server(listener);
+
+    if config.server.has_runtime_tuning() {
+        let mut conf = ServerConf::default();
+        conf.upstream_keepalive_pool_size = config
+            .server
+            .upstream_keepalive_pool_size
+            .unwrap_or(200000);
+        if let Some(threads) = config.server.worker_threads {
+            conf.threads = threads;
+        }
+        conf.grace_period_seconds = config.server.grace_period_seconds;
+        conf.graceful_shutdown_timeout_seconds = config.server.graceful_shutdown_timeout_seconds;
+        builder = builder.server_config(conf);
+    }
+
     for route in routes {
         builder = builder.add_route(route);
     }
