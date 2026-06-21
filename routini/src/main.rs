@@ -73,6 +73,10 @@ fn main() -> Result<()> {
         builder = builder.https_redirect(https_redirect);
     }
 
+    if let Some(level) = config.server.compression_level {
+        builder = builder.compression_level(level);
+    }
+
     if let Some(tls) = &config.proxy.tls {
         builder = builder.tls(tls.to_builder_tls());
     }

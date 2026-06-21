@@ -115,6 +115,8 @@ pub struct Proxy {
     access_log: bool,
     /// Redirect plain-HTTP requests to `https://` (nginx `return 301 https://...`).
     https_redirect: bool,
+    /// Downstream response compression level (nginx `gzip`); 0 disables it.
+    compression_level: u32,
 }
 
 impl Proxy {
@@ -162,12 +164,18 @@ impl Proxy {
             default_regex: Arc::new(default_regex),
             access_log: true,
             https_redirect: false,
+            compression_level: 0,
         }
     }
 
     /// Enable or disable the per-request access log.
     pub fn set_access_log(&mut self, enabled: bool) {
         self.access_log = enabled;
+    }
+
+    /// Set the downstream response compression level (0 disables).
+    pub fn set_compression_level(&mut self, level: u32) {
+        self.compression_level = level;
     }
 
     /// Redirect plain-HTTP requests to the `https://` equivalent.
@@ -307,6 +315,15 @@ impl ProxyHttp for Proxy {
             orig_path: None,
             conn_guard: None,
         }
+    }
+
+    /// Install the downstream response-compression module at the configured level (0 = disabled).
+    fn init_downstream_modules(&self, modules: &mut pingora::modules::http::HttpModules) {
+        modules.add_module(
+            pingora::modules::http::compression::ResponseCompressionBuilder::enable(
+                self.compression_level,
+            ),
+        );
     }
 
     /// Resolve the route once, up front, so every later filter can read it from `ctx` and so

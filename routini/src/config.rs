@@ -84,6 +84,8 @@ pub struct ServerConfig {
     pub access_log: Option<bool>,
     /// Redirect plain-HTTP requests to `https://`. Defaults to off.
     pub https_redirect: Option<bool>,
+    /// Downstream response compression level (nginx `gzip`); 0/omitted disables.
+    pub compression_level: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

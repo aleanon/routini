@@ -64,6 +64,7 @@ pub fn proxy_server(listener: TcpListener) -> ServerBuilder {
         prometheus_address: None,
         access_log: true,
         https_redirect: false,
+        compression_level: 0,
     }
 }
 
@@ -212,6 +213,7 @@ pub struct ServerBuilder {
     prometheus_address: Option<String>,
     access_log: bool,
     https_redirect: bool,
+    compression_level: u32,
 }
 impl ServerBuilder {
     pub fn add_route(mut self, route: impl Into<Route>) -> Self {
@@ -251,6 +253,12 @@ impl ServerBuilder {
     /// Redirect plain-HTTP requests to their `https://` equivalent. Default: off.
     pub fn https_redirect(mut self, enabled: bool) -> Self {
         self.https_redirect = enabled;
+        self
+    }
+
+    /// Downstream response compression level (nginx `gzip`); 0 disables. Default: 0.
+    pub fn compression_level(mut self, level: u32) -> Self {
+        self.compression_level = level;
         self
     }
 
@@ -315,6 +323,7 @@ impl ServerBuilder {
         );
         router.set_access_log(self.access_log);
         router.set_https_redirect(self.https_redirect);
+        router.set_compression_level(self.compression_level);
 
         if let Some(endpoint_address) = self.set_strategy_endpoint {
             let endpoint = SetStrategyEndpoint::service(router.clone(), &endpoint_address);
