@@ -1,9 +1,22 @@
 use bytes::Bytes;
 use http::StatusCode;
 use matchit::Router;
+use pingora::cache::cache_control::CacheControl;
+use pingora::cache::eviction::simple_lru::Manager as LruManager;
+use pingora::cache::filters::resp_cacheable;
+use pingora::cache::{CacheMeta, CacheMetaDefaults, MemCache, RespCacheable};
 use quick_cache::sync::Cache;
 use regex::Regex;
+use std::sync::LazyLock;
+use std::time::SystemTime;
 use std::{net::IpAddr, sync::Arc, time::Instant};
+
+/// Shared in-memory response cache backend and its LRU eviction manager (nginx `proxy_cache_path`).
+static CACHE_BACKEND: LazyLock<MemCache> = LazyLock::new(MemCache::new);
+static CACHE_EVICTION: LazyLock<LruManager> =
+    LazyLock::new(|| LruManager::new(256 * 1024 * 1024)); // 256 MiB
+/// Only origin `Cache-Control` drives default cacheability; per-route TTL is applied explicitly.
+const CACHE_DEFAULTS: CacheMetaDefaults = CacheMetaDefaults::new(|_| None, 0, 0);
 
 use pingora::{
     Error, ErrorSource, ErrorType, ImmutStr, Result, RetryType,
@@ -438,6 +451,66 @@ impl ProxyHttp for Proxy {
             }
         }
         Ok(())
+    }
+
+    /// Enable the shared response cache for cacheable (GET/HEAD) requests on cache-enabled routes.
+    fn request_cache_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<()> {
+        let enabled = ctx
+            .route
+            .as_ref()
+            .and_then(|r| r.runtime.config.cache.as_ref())
+            .is_some_and(|c| c.enabled);
+        if !enabled {
+            return Ok(());
+        }
+
+        let method = &session.req_header().method;
+        if *method != http::Method::GET && *method != http::Method::HEAD {
+            return Ok(());
+        }
+
+        session.cache.enable(
+            &*CACHE_BACKEND,
+            Some(&*CACHE_EVICTION as &'static (dyn pingora::cache::eviction::EvictionManager + Sync)),
+            None,
+            None,
+            None,
+        );
+        Ok(())
+    }
+
+    /// Decide cacheability of an upstream response: honor origin `Cache-Control`, otherwise cache
+    /// 200 responses for the route's configured TTL.
+    fn response_cache_filter(
+        &self,
+        _session: &Session,
+        resp: &ResponseHeader,
+        ctx: &mut Self::CTX,
+    ) -> Result<RespCacheable> {
+        let cc = CacheControl::from_resp_headers(resp);
+        let cacheable = resp_cacheable(cc.as_ref(), resp.clone(), false, &CACHE_DEFAULTS);
+        if matches!(cacheable, RespCacheable::Cacheable(_)) {
+            return Ok(cacheable);
+        }
+
+        if resp.status == StatusCode::OK {
+            if let Some(ttl) = ctx
+                .route
+                .as_ref()
+                .and_then(|r| r.runtime.config.cache.as_ref())
+                .map(|c| c.ttl)
+            {
+                let now = SystemTime::now();
+                return Ok(RespCacheable::Cacheable(CacheMeta::new(
+                    now + ttl,
+                    now,
+                    0,
+                    0,
+                    resp.clone(),
+                )));
+            }
+        }
+        Ok(cacheable)
     }
 
     async fn upstream_peer(

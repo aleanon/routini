@@ -13,8 +13,8 @@ use crate::{
     adaptive_loadbalancer::options::AdaptiveLbOpt,
     load_balancing::strategy::Adaptive,
     route::{
-        HeaderRules, HostRewrite, PassiveHealthConfig, RetryConfig, RouteAction, RouteConfig,
-        TimeoutConfig, UpstreamTls,
+        CacheConfig, HeaderRules, HostRewrite, PassiveHealthConfig, RetryConfig, RouteAction,
+        RouteConfig, TimeoutConfig, UpstreamTls,
     },
     server_builder::{Route, TlsConfig as BuilderTlsConfig},
 };
@@ -124,6 +124,8 @@ pub struct RouteEntry {
     pub regex: bool,
     /// Short-circuit response (redirect/return) instead of proxying.
     pub action: Option<ActionInput>,
+    /// Response caching (nginx `proxy_cache`).
+    pub cache: Option<CacheInput>,
     #[serde(default = "default_true")]
     pub strip_prefix: bool,
     #[serde(default)]
@@ -176,6 +178,7 @@ impl RouteEntry {
             rate_limit_rps: self.rate_limit_rps,
             max_connections: self.max_connections,
             action,
+            cache: self.cache.as_ref().map(CacheInput::to_cache),
         };
 
         let lb_opt = self.load_balancer.to_lb_opt();
@@ -189,6 +192,28 @@ impl RouteEntry {
             route = route.host(host.clone());
         }
         Ok(route)
+    }
+}
+
+/// Response caching config (nginx `proxy_cache`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct CacheInput {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_cache_ttl_secs")]
+    pub ttl_secs: u64,
+}
+
+fn default_cache_ttl_secs() -> u64 {
+    60
+}
+
+impl CacheInput {
+    fn to_cache(&self) -> CacheConfig {
+        CacheConfig {
+            enabled: self.enabled,
+            ttl: Duration::from_secs(self.ttl_secs),
+        }
     }
 }
 

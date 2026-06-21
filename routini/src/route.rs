@@ -61,6 +61,14 @@ impl Default for PassiveHealthConfig {
     }
 }
 
+/// Response caching for a route (nginx `proxy_cache`). Responses are cached in a shared in-memory
+/// store; origin `Cache-Control` is honored, otherwise 200 responses are cached for `ttl`.
+#[derive(Debug, Clone)]
+pub struct CacheConfig {
+    pub enabled: bool,
+    pub ttl: Duration,
+}
+
 /// An immediate response a route can return without proxying (nginx `return` / `rewrite ... redirect`).
 #[derive(Debug, Clone)]
 pub enum RouteAction {
@@ -371,6 +379,8 @@ pub struct RouteConfig {
     pub max_connections: Option<usize>,
     /// If set, the route short-circuits with this response instead of proxying (redirect/return).
     pub action: Option<RouteAction>,
+    /// Response caching (nginx `proxy_cache`). `None` = no caching.
+    pub cache: Option<CacheConfig>,
 }
 
 impl Default for RouteConfig {
@@ -387,6 +397,7 @@ impl Default for RouteConfig {
             rate_limit_rps: None,
             max_connections: None,
             action: None,
+            cache: None,
         }
     }
 }
