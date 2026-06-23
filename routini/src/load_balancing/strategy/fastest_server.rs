@@ -7,30 +7,51 @@ use std::{
 use atomic_float::AtomicF32;
 
 use crate::load_balancing::{
-    Backend, BackendMetrics, Metrics,
+    Backend, Metrics, NoMetric,
     strategy::{BackendIter, BackendSelection, Strategy},
 };
 
-pub type LatencyEWMA = AtomicF32;
+/// EWMA latency (milliseconds) shared across `Backend` clones via an internal `Arc`.
+#[derive(Clone, Debug, Default)]
+pub struct LatencyEWMA(Arc<AtomicF32>);
+
+impl LatencyEWMA {
+    pub fn new(initial: f32) -> Self {
+        Self(Arc::new(AtomicF32::new(initial)))
+    }
+}
+
+impl Metrics for LatencyEWMA {
+    fn record_latency(&self, latency: Duration, alpha: f32) {
+        let old_avg = self.0.load(Ordering::Relaxed);
+        let latency = latency.as_secs_f32() * 1000.0;
+
+        let ewma = if old_avg == 0.0 {
+            latency
+        } else {
+            alpha * latency + (1.0 - alpha) * old_avg
+        };
+
+        self.0.store(ewma, Ordering::Relaxed);
+    }
+
+    fn average_latency(&self) -> Option<f32> {
+        Some(self.0.load(Ordering::Relaxed))
+    }
+}
 
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct FastestServer;
 
-impl Strategy for FastestServer {
-    type BackendSelector = FastestServerSelector;
+impl<M: Metrics> Strategy<M> for FastestServer {
+    type BackendSelector = FastestServerSelector<M>;
 
-    fn metrics(&self) -> BackendMetrics {
-        Some(Arc::new(LatencyEWMA::new(0.0)))
-    }
-
-    fn build_backend_selector(&self, backends: &BTreeSet<Backend>) -> Self::BackendSelector {
+    fn build_backend_selector(&self, backends: &BTreeSet<Backend<M>>) -> Self::BackendSelector {
         let mut backends_with_metrics = Vec::with_capacity(backends.len());
 
         for backend in backends.iter() {
-            let Some(latency) = backend.metrics.average_latency() else {
-                log::error!("Missing Latency extension on backend");
-                unreachable!("Implementation missing")
-            };
+            // Backends whose `M` doesn't track latency report 0.0 (treated as "no data").
+            let latency = backend.metrics.average_latency().unwrap_or(0.0);
             backends_with_metrics.push((backend, latency));
         }
 
@@ -51,12 +72,12 @@ impl Strategy for FastestServer {
     }
 }
 
-pub struct FastestServerSelector {
-    pub backends: Box<[Backend]>,
+pub struct FastestServerSelector<M: Metrics = NoMetric> {
+    pub backends: Box<[Backend<M>]>,
 }
 
-impl BackendSelection for FastestServerSelector {
-    type Iter = FastestServerIter;
+impl<M: Metrics> BackendSelection<M> for FastestServerSelector<M> {
+    type Iter = FastestServerIter<M>;
 
     fn iter(self: &std::sync::Arc<Self>, _key: &[u8]) -> Self::Iter {
         FastestServerIter {
@@ -66,36 +87,16 @@ impl BackendSelection for FastestServerSelector {
     }
 }
 
-pub struct FastestServerIter {
-    selector: Arc<FastestServerSelector>,
+pub struct FastestServerIter<M: Metrics = NoMetric> {
+    selector: Arc<FastestServerSelector<M>>,
     index: usize,
 }
 
-impl BackendIter for FastestServerIter {
-    fn next(&mut self) -> Option<&Backend> {
+impl<M: Metrics> BackendIter<M> for FastestServerIter<M> {
+    fn next(&mut self) -> Option<&Backend<M>> {
         let backend = self.selector.backends.get(self.index)?;
         self.index += 1;
         Some(backend)
-    }
-}
-
-impl Metrics for LatencyEWMA {
-    fn record_latency(&self, latency: Duration, alpha: f32) {
-        let old_avg = self.load(Ordering::Relaxed);
-        let latency = latency.as_secs_f32() * 1000.0;
-
-        let ewma = if old_avg == 0.0 {
-            latency
-        } else {
-            let latency = alpha * latency + (1.0 - alpha) * old_avg;
-            latency
-        };
-
-        self.store(ewma, Ordering::Relaxed);
-    }
-
-    fn average_latency(&self) -> Option<f32> {
-        Some(self.load(Ordering::Relaxed))
     }
 }
 
@@ -105,19 +106,15 @@ mod tests {
 
     use super::*;
 
-    fn create_backend_with_latency(addr: &str) -> Backend {
-        let mut backend = Backend::new(addr).unwrap();
-        backend.metrics = Some(Arc::new(LatencyEWMA::new(0.0)));
-        backend
+    fn create_backend_with_latency(addr: &str) -> Backend<LatencyEWMA> {
+        Backend::build(addr, 1).unwrap()
     }
 
-    fn set_backend_latency(backend: &Backend, latency_ms: Duration) {
-        if let Some(metrics) = &backend.metrics {
-            metrics.record_latency(latency_ms, DEFAULT_SMOOTHING_FACTOR);
-        }
+    fn set_backend_latency(backend: &Backend<LatencyEWMA>, latency_ms: Duration) {
+        backend.metrics.record_latency(latency_ms, DEFAULT_SMOOTHING_FACTOR);
     }
 
-    fn get_backend_latency(backend: &Backend) -> Option<f32> {
+    fn get_backend_latency(backend: &Backend<LatencyEWMA>) -> Option<f32> {
         backend.metrics.average_latency()
     }
 
@@ -247,7 +244,7 @@ mod tests {
 
     #[test]
     fn test_empty_backends() {
-        let backends = BTreeSet::new();
+        let backends: BTreeSet<Backend<LatencyEWMA>> = BTreeSet::new();
         let strategy = FastestServer;
         let selector = Arc::new(strategy.build_backend_selector(&backends));
 

@@ -4,19 +4,19 @@ use rand::RngCore;
 use serde::Deserialize;
 
 use crate::load_balancing::{
-    Backend,
+    Backend, Metrics, NoMetric,
     strategy::{SelectionAlgorithm, Strategy, utils::WeightedSelector},
 };
 
-pub type RandomSelector = WeightedSelector<RandomAlgo>;
+pub type RandomSelector<M = NoMetric> = WeightedSelector<RandomAlgo, M>;
 
 #[derive(PartialEq, Default, Deserialize, Clone)]
 pub struct Random;
 
-impl Strategy for Random {
-    type BackendSelector = RandomSelector;
+impl<M: Metrics> Strategy<M> for Random {
+    type BackendSelector = RandomSelector<M>;
 
-    fn build_backend_selector(&self, backends: &BTreeSet<Backend>) -> Self::BackendSelector {
+    fn build_backend_selector(&self, backends: &BTreeSet<Backend<M>>) -> Self::BackendSelector {
         RandomSelector::new(backends)
     }
 }

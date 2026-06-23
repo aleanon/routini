@@ -1,14 +1,14 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use routini::adaptive_loadbalancer::AdaptiveLoadBalancer;
 use routini::adaptive_loadbalancer::decision_engine::AdaptiveDecisionEngine;
 use routini::adaptive_loadbalancer::options::AdaptiveLbOpt;
+use routini::adaptive_loadbalancer::{AdaptiveBackend, AdaptiveLoadBalancer};
+use routini::load_balancing::Backends;
 use routini::load_balancing::discovery::Static;
 use routini::load_balancing::strategy::Adaptive;
-use routini::load_balancing::{Backend, Backends};
 use std::collections::BTreeSet;
 use std::hint::black_box;
 
-fn create_backends(count: usize) -> BTreeSet<Backend> {
+fn create_backends(count: usize) -> BTreeSet<AdaptiveBackend> {
     let mut backends = BTreeSet::new();
 
     for i in 0..count {
@@ -21,7 +21,7 @@ fn create_backends(count: usize) -> BTreeSet<Backend> {
             format!("127.0.2.{}:8080", (i - 510) + 1)
         };
 
-        let backend = Backend::new(&addr).expect("Failed to create backend");
+        let backend = AdaptiveBackend::build(&addr, 1).expect("Failed to create backend");
         backends.insert(backend);
     }
     backends

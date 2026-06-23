@@ -28,7 +28,8 @@ use pingora::{
 use std::collections::HashMap;
 
 use crate::{
-    load_balancing::{Backend, Metrics},
+    adaptive_loadbalancer::AdaptiveBackend,
+    load_balancing::Metrics,
     route::{RouteAction, RouteRuntime, RouteState},
     utils::constants::{DEFAULT_PATH_CACHE_CAPACITY, DEFAULT_PATH_REMAINDER_IDENTIFIER},
 };
@@ -338,7 +339,7 @@ pub struct ConnectionCTX {
     /// filter sees a consistent config for this request even if a reload happens mid-flight.
     state: Option<Arc<RouteState>>,
     upstream_start: Option<Instant>,
-    backend: Option<Backend>,
+    backend: Option<AdaptiveBackend>,
     /// Backends already attempted this request, so retries pick a different one (failover).
     tried: Vec<SocketAddr>,
     /// Running total of request body bytes seen, for `max_body_size` enforcement.
@@ -687,13 +688,8 @@ impl ProxyHttp for Proxy {
             peer.options.verify_hostname = tls.verify;
             peer
         } else {
-            match backend.ext.get::<HttpPeer>() {
-                Some(peer) => peer.clone(),
-                None => {
-                    log::error!("HttpPeer not attached to backend: {}", &backend.addr);
-                    HttpPeer::new(backend.addr.clone(), false, String::new())
-                }
-            }
+            // The backend carries its own (plain-HTTP) peer as a typed field.
+            backend.peer.clone()
         };
 
         if tls.is_some_and(|t| t.h2) {
@@ -932,7 +928,7 @@ mod tests {
 
     fn create_test_route_value(strip_path: bool) -> RouteValue {
         let mut backends = BTreeSet::new();
-        backends.insert(Backend::new("127.0.0.1:8080").unwrap());
+        backends.insert(AdaptiveBackend::build("127.0.0.1:8080", 1).unwrap());
         let backends = Backends::new(Static::new(backends));
         let decision_engine = AdaptiveDecisionEngine::new(&AdaptiveLbOpt::default());
         let lb = AdaptiveLoadBalancer::from_backends(backends, None, decision_engine);

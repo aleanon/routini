@@ -14,7 +14,7 @@
 
 //! Consistent Hashing
 
-pub type ConsistentSelector = KetamaHashingSelector;
+pub type ConsistentSelector<M = NoMetric> = KetamaHashingSelector<M>;
 
 use super::*;
 use pingora::protocols::l4::socket::SocketAddr;
@@ -25,10 +25,10 @@ use std::collections::HashMap;
 #[derive(Default, PartialEq, Deserialize, Clone)]
 pub struct Consistent;
 
-impl Strategy for Consistent {
-    type BackendSelector = ConsistentSelector;
+impl<M: Metrics> Strategy<M> for Consistent {
+    type BackendSelector = ConsistentSelector<M>;
 
-    fn build_backend_selector(&self, backends: &BTreeSet<Backend>) -> Self::BackendSelector {
+    fn build_backend_selector(&self, backends: &BTreeSet<Backend<M>>) -> Self::BackendSelector {
         let buckets: Vec<_> = backends
             .iter()
             .filter_map(|b| {
@@ -53,14 +53,14 @@ impl Strategy for Consistent {
 }
 
 /// Weighted Ketama consistent hashing
-pub struct KetamaHashingSelector {
+pub struct KetamaHashingSelector<M: Metrics = NoMetric> {
     ring: Continuum,
     // TODO: update Ketama to just store this
-    backends: HashMap<SocketAddr, Backend>,
+    backends: HashMap<SocketAddr, Backend<M>>,
 }
 
-impl BackendSelection for KetamaHashingSelector {
-    type Iter = OwnedNodeIterator;
+impl<M: Metrics> BackendSelection<M> for KetamaHashingSelector<M> {
+    type Iter = OwnedNodeIterator<M>;
 
     fn iter(self: &Arc<Self>, key: &[u8]) -> Self::Iter {
         OwnedNodeIterator {
@@ -71,13 +71,13 @@ impl BackendSelection for KetamaHashingSelector {
 }
 
 /// Iterator over a Continuum
-pub struct OwnedNodeIterator {
+pub struct OwnedNodeIterator<M: Metrics = NoMetric> {
     idx: usize,
-    ring: Arc<KetamaHashingSelector>,
+    ring: Arc<KetamaHashingSelector<M>>,
 }
 
-impl BackendIter for OwnedNodeIterator {
-    fn next(&mut self) -> Option<&Backend> {
+impl<M: Metrics> BackendIter<M> for OwnedNodeIterator<M> {
+    fn next(&mut self) -> Option<&Backend<M>> {
         self.ring.ring.get_addr(&mut self.idx).and_then(|addr| {
             let addr = SocketAddr::Inet(*addr);
             self.ring.backends.get(&addr)

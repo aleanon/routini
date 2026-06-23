@@ -3,19 +3,19 @@ use std::collections::BTreeSet;
 use serde::Deserialize;
 
 use crate::load_balancing::{
-    Backend,
+    Backend, Metrics, NoMetric,
     strategy::{Strategy, utils::WeightedSelector},
 };
 
-pub type FNVHashSelector = WeightedSelector<fnv::FnvHasher>;
+pub type FNVHashSelector<M = NoMetric> = WeightedSelector<fnv::FnvHasher, M>;
 
 #[derive(PartialEq, Deserialize, Clone)]
 pub struct FNVHash;
 
-impl Strategy for FNVHash {
-    type BackendSelector = FNVHashSelector;
+impl<M: Metrics> Strategy<M> for FNVHash {
+    type BackendSelector = FNVHashSelector<M>;
 
-    fn build_backend_selector(&self, backends: &BTreeSet<Backend>) -> Self::BackendSelector {
+    fn build_backend_selector(&self, backends: &BTreeSet<Backend<M>>) -> Self::BackendSelector {
         FNVHashSelector::new(backends)
     }
 }

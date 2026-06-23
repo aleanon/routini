@@ -6,19 +6,19 @@ use std::{
 use serde::Deserialize;
 
 use crate::load_balancing::{
-    Backend,
+    Backend, Metrics, NoMetric,
     strategy::{SelectionAlgorithm, Strategy, utils::WeightedSelector},
 };
 
-pub type RoundRobinSelector = WeightedSelector<RoundRobinAlgo>;
+pub type RoundRobinSelector<M = NoMetric> = WeightedSelector<RoundRobinAlgo, M>;
 
 #[derive(PartialEq, Default, Deserialize, Clone)]
 pub struct RoundRobin;
 
-impl Strategy for RoundRobin {
-    type BackendSelector = RoundRobinSelector;
+impl<M: Metrics> Strategy<M> for RoundRobin {
+    type BackendSelector = RoundRobinSelector<M>;
 
-    fn build_backend_selector(&self, backends: &BTreeSet<Backend>) -> Self::BackendSelector {
+    fn build_backend_selector(&self, backends: &BTreeSet<Backend<M>>) -> Self::BackendSelector {
         RoundRobinSelector::new(backends)
     }
 }

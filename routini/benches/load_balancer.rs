@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use std::hint::black_box;
 use std::sync::Arc;
 
-fn create_backends(strategy: &impl Strategy, count: usize) -> BTreeSet<Backend> {
+fn create_backends(_strategy: &impl Strategy, count: usize) -> BTreeSet<Backend> {
     (0..count)
         .map(|i| {
             // Create valid IP addresses using different octets
@@ -19,10 +19,7 @@ fn create_backends(strategy: &impl Strategy, count: usize) -> BTreeSet<Backend> 
             } else {
                 format!("127.0.2.{}:8080", (i - 510) + 1)
             };
-            let mut backend = Backend::new(&addr)
-                .expect(&format!("Failed to create backend with addr: {}", addr));
-            backend.metrics = strategy.metrics();
-            backend
+            Backend::new(&addr).expect(&format!("Failed to create backend with addr: {}", addr))
         })
         .collect()
 }

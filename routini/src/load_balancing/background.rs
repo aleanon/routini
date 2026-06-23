@@ -16,6 +16,7 @@
 
 use std::time::{Duration, Instant};
 
+use crate::load_balancing::Metrics;
 use crate::load_balancing::strategy::Strategy;
 
 use super::LoadBalancer;
@@ -23,7 +24,7 @@ use async_trait::async_trait;
 use pingora::{server::ShutdownWatch, services::background::BackgroundService};
 
 #[async_trait]
-impl<S: Strategy + 'static> BackgroundService for LoadBalancer<S> {
+impl<S: Strategy<M> + 'static, M: Metrics> BackgroundService for LoadBalancer<S, M> {
     async fn start(&self, shutdown: ShutdownWatch) -> () {
         // 136 years
         const NEVER: Duration = Duration::from_secs(u32::MAX as u64);

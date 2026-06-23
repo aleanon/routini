@@ -10,18 +10,26 @@ use crate::{
         options::{AdaptiveLbConfig, AdaptiveLbOpt},
     },
     load_balancing::{
-        Backend, Backends, LoadBalancer, health_check::TcpHealthCheck, strategy::Adaptive,
+        Backend, Backends, LoadBalancer,
+        health_check::TcpHealthCheck,
+        strategy::{Adaptive, adaptive::AdaptiveStrategyMetrics},
     },
 };
+
+/// The metrics type the adaptive load balancer pins its backends to.
+pub type AdaptiveBackend = Backend<AdaptiveStrategyMetrics>;
+/// A [`Backends`] collection pinned to the adaptive metrics type.
+pub type AdaptiveBackends = Backends<AdaptiveStrategyMetrics>;
+
 pub struct AdaptiveLoadBalancer<D> {
-    lb: LoadBalancer<Adaptive>,
+    lb: LoadBalancer<Adaptive, AdaptiveStrategyMetrics>,
     decision_engine: D,
     pub config: AdaptiveLbConfig,
 }
 
 impl<D: DecisionEngine> AdaptiveLoadBalancer<D> {
     pub fn from_backends(
-        backends: Backends,
+        backends: AdaptiveBackends,
         options: Option<AdaptiveLbOpt>,
         decision_engine: D,
     ) -> Self {
@@ -42,11 +50,11 @@ impl<D: DecisionEngine> AdaptiveLoadBalancer<D> {
         }
     }
 
-    pub fn backends(&self) -> Arc<BTreeSet<Backend>> {
+    pub fn backends(&self) -> Arc<BTreeSet<AdaptiveBackend>> {
         self.lb.backends().get_backend()
     }
 
-    pub fn select(&self, key: &[u8]) -> Option<Backend> {
+    pub fn select(&self, key: &[u8]) -> Option<AdaptiveBackend> {
         self.lb.select(key, self.config.max_iterations)
     }
 
@@ -55,14 +63,14 @@ impl<D: DecisionEngine> AdaptiveLoadBalancer<D> {
     pub fn select_excluding(
         &self,
         exclude: &[pingora::protocols::l4::socket::SocketAddr],
-    ) -> Option<Backend> {
+    ) -> Option<AdaptiveBackend> {
         self.lb.select_with(&[], self.config.max_iterations, |backend, healthy| {
             healthy && !exclude.iter().any(|addr| addr == &backend.addr)
         })
     }
 
     /// Manually enable/disable a backend (used by passive health checks to eject/restore).
-    pub fn set_backend_enabled(&self, backend: &Backend, enabled: bool) {
+    pub fn set_backend_enabled(&self, backend: &AdaptiveBackend, enabled: bool) {
         self.lb.backends().set_enable(backend, enabled);
     }
 

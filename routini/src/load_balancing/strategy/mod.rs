@@ -23,7 +23,7 @@ pub mod random;
 pub mod round_robin;
 pub mod utils;
 
-use crate::load_balancing::BackendMetrics;
+use crate::load_balancing::{Metrics, NoMetric};
 
 pub use {
     adaptive::Adaptive, consistent::Consistent, fewest_connections::FewestConnections,
@@ -40,16 +40,11 @@ use std::hash::Hasher;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// A builder for a backend selector
-pub trait Strategy: Send + Sync {
-    type BackendSelector: BackendSelection;
+/// A builder for a backend selector, generic over the backend metrics type `M`.
+pub trait Strategy<M: Metrics = NoMetric>: Send + Sync {
+    type BackendSelector: BackendSelection<M>;
 
-    fn build_backend_selector(&self, backends: &BTreeSet<Backend>) -> Self::BackendSelector;
-
-    /// Define metrics that the strategy needs, these will be stored in the Backend struct.
-    fn metrics(&self) -> BackendMetrics {
-        None
-    }
+    fn build_backend_selector(&self, backends: &BTreeSet<Backend<M>>) -> Self::BackendSelector;
 
     /// Determines if the BackendSelector should be periodically rebuilt.
     fn rebuild_frequency(&self) -> Option<Duration> {
@@ -58,9 +53,9 @@ pub trait Strategy: Send + Sync {
 }
 
 /// [BackendSelection] is the interface to implement backend selection mechanisms.
-pub trait BackendSelection: Send + Sync {
+pub trait BackendSelection<M: Metrics = NoMetric>: Send + Sync {
     /// The [BackendIter] returned from iter() below.
-    type Iter: BackendIter;
+    type Iter: BackendIter<M>;
 
     /// Select backends for a given key.
     ///
@@ -73,9 +68,9 @@ pub trait BackendSelection: Send + Sync {
 /// An iterator to find the suitable backend
 ///
 /// Similar to [Iterator] but allow self referencing.
-pub trait BackendIter {
+pub trait BackendIter<M: Metrics = NoMetric> {
     /// Return `Some(&Backend)` when there are more backends left to choose from.
-    fn next(&mut self) -> Option<&Backend>;
+    fn next(&mut self) -> Option<&Backend<M>>;
 }
 
 /// [SelectionAlgorithm] is the interface to implement selection algorithms.

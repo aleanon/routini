@@ -19,9 +19,8 @@ use pingora::protocols::l4::socket::SocketAddr;
 use pingora_limits::inflight::{Guard, Inflight};
 use pingora_limits::rate::Rate;
 
-use crate::{
-    adaptive_loadbalancer::{AdaptiveLoadBalancer, decision_engine::AdaptiveDecisionEngine},
-    load_balancing::Backend,
+use crate::adaptive_loadbalancer::{
+    AdaptiveBackend, AdaptiveLoadBalancer, decision_engine::AdaptiveDecisionEngine,
 };
 
 pub type SharedLb = Arc<AdaptiveLoadBalancer<AdaptiveDecisionEngine>>;
@@ -194,7 +193,7 @@ struct FailWindow {
 }
 
 struct Ejection {
-    backend: Backend,
+    backend: AdaptiveBackend,
     until: Instant,
 }
 
@@ -217,7 +216,7 @@ impl PassiveHealth {
 
     /// Record a connection failure. Returns `true` when the backend has crossed `max_fails`
     /// within the window and should be ejected by the caller.
-    pub fn record_failure(&self, backend: &Backend) -> bool {
+    pub fn record_failure(&self, backend: &AdaptiveBackend) -> bool {
         if !self.config.enabled {
             return false;
         }
@@ -243,7 +242,7 @@ impl PassiveHealth {
     }
 
     /// Clear the failure window for a backend after a successful response.
-    pub fn record_success(&self, backend: &Backend) {
+    pub fn record_success(&self, backend: &AdaptiveBackend) {
         if !self.config.enabled {
             return;
         }
@@ -251,7 +250,7 @@ impl PassiveHealth {
     }
 
     /// Return backends whose ejection window has elapsed, so the caller can re-enable them.
-    pub fn take_expired(&self, now: Instant) -> Vec<Backend> {
+    pub fn take_expired(&self, now: Instant) -> Vec<AdaptiveBackend> {
         if !self.config.enabled {
             return Vec::new();
         }
@@ -584,7 +583,7 @@ mod tests {
             fail_timeout: Duration::from_millis(50),
         };
         let ph = PassiveHealth::new(cfg);
-        let backend = Backend::new("127.0.0.1:9001").unwrap();
+        let backend = AdaptiveBackend::build("127.0.0.1:9001", 1).unwrap();
 
         assert!(!ph.record_failure(&backend), "first failure should not eject");
         assert!(ph.record_failure(&backend), "second failure should eject");
@@ -634,7 +633,7 @@ mod tests {
     #[test]
     fn passive_health_disabled_never_ejects() {
         let ph = PassiveHealth::new(PassiveHealthConfig::default()); // enabled = false
-        let backend = Backend::new("127.0.0.1:9001").unwrap();
+        let backend = AdaptiveBackend::build("127.0.0.1:9001", 1).unwrap();
         for _ in 0..5 {
             assert!(!ph.record_failure(&backend));
         }

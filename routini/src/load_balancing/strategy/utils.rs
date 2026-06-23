@@ -14,28 +14,29 @@
 
 use std::{
     collections::{BTreeSet, HashSet},
+    marker::PhantomData,
     sync::Arc,
 };
 
 use fnv::FnvHasher;
 
 use crate::load_balancing::{
-    Backend,
+    Backend, Metrics, NoMetric,
     strategy::{BackendIter, BackendSelection, SelectionAlgorithm},
 };
 
 /// Weighted selection with a given selection algorithm
 ///
 /// The default algorithm is [FnvHasher]. See [super::algorithms] for more choices.
-pub struct WeightedSelector<H = FnvHasher> {
-    backends: Box<[Backend]>,
+pub struct WeightedSelector<H = FnvHasher, M: Metrics = NoMetric> {
+    backends: Box<[Backend<M>]>,
     // each item is an index to the `backends`, use u16 to save memory, support up to 2^16 backends
     weighted: Box<[u16]>,
     algorithm: H,
 }
 
-impl<H: SelectionAlgorithm + Send + Sync> WeightedSelector<H> {
-    pub fn new(backends: &BTreeSet<Backend>) -> Self {
+impl<H: SelectionAlgorithm + Send + Sync, M: Metrics> WeightedSelector<H, M> {
+    pub fn new(backends: &BTreeSet<Backend<M>>) -> Self {
         assert!(
             backends.len() <= u16::MAX as usize,
             "support up to 2^16 backends"
@@ -55,8 +56,8 @@ impl<H: SelectionAlgorithm + Send + Sync> WeightedSelector<H> {
     }
 }
 
-impl<H: SelectionAlgorithm + Send + Sync> BackendSelection for WeightedSelector<H> {
-    type Iter = WeightedIterator<H>;
+impl<H: SelectionAlgorithm + Send + Sync, M: Metrics> BackendSelection<M> for WeightedSelector<H, M> {
+    type Iter = WeightedIterator<H, M>;
 
     fn iter(self: &Arc<Self>, key: &[u8]) -> Self::Iter {
         WeightedIterator::new(key, self.clone())
@@ -66,16 +67,16 @@ impl<H: SelectionAlgorithm + Send + Sync> BackendSelection for WeightedSelector<
 /// An iterator over the backends of a [Weighted] selection.
 ///
 /// See [super::BackendSelection] for more information.
-pub struct WeightedIterator<H> {
+pub struct WeightedIterator<H, M: Metrics = NoMetric> {
     // the unbounded index seed
     index: u64,
-    backend: Arc<WeightedSelector<H>>,
+    backend: Arc<WeightedSelector<H, M>>,
     first: bool,
 }
 
-impl<H: SelectionAlgorithm> WeightedIterator<H> {
+impl<H: SelectionAlgorithm, M: Metrics> WeightedIterator<H, M> {
     /// Constructs a new [WeightedIterator].
-    fn new(input: &[u8], backend: Arc<WeightedSelector<H>>) -> Self {
+    fn new(input: &[u8], backend: Arc<WeightedSelector<H, M>>) -> Self {
         Self {
             index: backend.algorithm.next(input),
             backend,
@@ -84,8 +85,8 @@ impl<H: SelectionAlgorithm> WeightedIterator<H> {
     }
 }
 
-impl<H: SelectionAlgorithm> BackendIter for WeightedIterator<H> {
-    fn next(&mut self) -> Option<&Backend> {
+impl<H: SelectionAlgorithm, M: Metrics> BackendIter<M> for WeightedIterator<H, M> {
+    fn next(&mut self) -> Option<&Backend<M>> {
         if self.backend.backends.is_empty() {
             // short circuit if empty
             return None;
@@ -109,19 +110,20 @@ impl<H: SelectionAlgorithm> BackendIter for WeightedIterator<H> {
 
 /// An iterator which wraps another iterator and yields unique items. It optionally takes a max
 /// number of iterations if the wrapped iterator never returns.
-pub struct UniqueIterator<I>
+pub struct UniqueIterator<I, M: Metrics = NoMetric>
 where
-    I: BackendIter,
+    I: BackendIter<M>,
 {
     iter: I,
     seen: HashSet<u64>,
     max_iterations: usize,
     steps: usize,
+    _phantom: PhantomData<M>,
 }
 
-impl<I> UniqueIterator<I>
+impl<I, M: Metrics> UniqueIterator<I, M>
 where
-    I: BackendIter,
+    I: BackendIter<M>,
 {
     /// Wrap a new iterator and specify the maximum number of times we want to iterate.
     pub fn new(iter: I, max_iterations: usize) -> Self {
@@ -130,10 +132,11 @@ where
             max_iterations,
             seen: HashSet::new(),
             steps: 0,
+            _phantom: PhantomData,
         }
     }
 
-    pub fn get_next(&mut self) -> Option<Backend> {
+    pub fn get_next(&mut self) -> Option<Backend<M>> {
         while let Some(item) = self.iter.next() {
             if self.steps >= self.max_iterations {
                 return None;

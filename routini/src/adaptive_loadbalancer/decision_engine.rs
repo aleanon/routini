@@ -1,9 +1,9 @@
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
 use crate::{
-    adaptive_loadbalancer::options::AdaptiveLbOpt,
+    adaptive_loadbalancer::{AdaptiveBackend, options::AdaptiveLbOpt},
     load_balancing::{
-        Backend, Metrics,
+        Metrics,
         strategy::{Adaptive, Strategy},
     },
 };
@@ -14,7 +14,7 @@ pub trait DecisionEngine {
     fn evaluate_strategy(
         &self,
         current_strategy: &Self::Strategy,
-        backends: &Arc<BTreeSet<Backend>>,
+        backends: &Arc<BTreeSet<AdaptiveBackend>>,
     ) -> Self::Strategy;
 }
 
@@ -47,7 +47,7 @@ impl AdaptiveDecisionEngine {
     /// Backends with no measurement yet are ignored rather than counted as `0.0`, which would
     /// otherwise mask real divergence (a single unmeasured backend would force the ratio to 1.0).
     /// Returns `None` when fewer than two backends have usable measurements.
-    fn latency_divergence(&self, backends: &Arc<BTreeSet<Backend>>) -> Option<f32> {
+    fn latency_divergence(&self, backends: &Arc<BTreeSet<AdaptiveBackend>>) -> Option<f32> {
         let mut min = f32::MAX;
         let mut max = f32::MIN;
         let mut measured = 0usize;
@@ -75,7 +75,7 @@ impl AdaptiveDecisionEngine {
     ///
     /// Returns `None` when fewer than two backends report connection counts (i.e. the active
     /// strategy is not tracking connections).
-    fn connection_divergence(&self, backends: &Arc<BTreeSet<Backend>>) -> Option<(f32, usize)> {
+    fn connection_divergence(&self, backends: &Arc<BTreeSet<AdaptiveBackend>>) -> Option<(f32, usize)> {
         let mut min = usize::MAX;
         let mut max = 0usize;
         let mut tracked = 0usize;
@@ -119,7 +119,7 @@ impl DecisionEngine for AdaptiveDecisionEngine {
     fn evaluate_strategy(
         &self,
         current_strategy: &Self::Strategy,
-        backends: &Arc<BTreeSet<Backend>>,
+        backends: &Arc<BTreeSet<AdaptiveBackend>>,
     ) -> Self::Strategy {
         if backends.len() < 2 {
             return Adaptive::RoundRobin;
@@ -162,13 +162,9 @@ impl DecisionEngine for AdaptiveDecisionEngine {
 mod tests {
     use std::sync::Arc;
 
-    use crate::{
-        adaptive_loadbalancer::options::AdaptiveLbOpt,
-        load_balancing::{
-            Backend,
-            strategy::{fastest_server::LatencyEWMA, fewest_connections::ActiveConnections},
-        },
-    };
+    use std::time::Duration;
+
+    use crate::adaptive_loadbalancer::options::AdaptiveLbOpt;
 
     use super::*;
 
@@ -180,20 +176,26 @@ mod tests {
         })
     }
 
-    fn backend_with_latency(addr: &str, latency_ms: f32) -> Backend {
-        let mut backend = Backend::new(addr).unwrap();
-        let metrics = Arc::new(LatencyEWMA::new(latency_ms));
-        backend.metrics = Some(metrics);
+    fn backend_with_latency(addr: &str, latency_ms: f32) -> AdaptiveBackend {
+        let backend = AdaptiveBackend::build(addr, 1).unwrap();
+        if latency_ms > 0.0 {
+            // alpha 1.0 with a zero starting average sets the EWMA directly to latency_ms.
+            backend
+                .metrics
+                .record_latency(Duration::from_secs_f32(latency_ms / 1000.0), 1.0);
+        }
         backend
     }
 
-    fn backend_with_connections(addr: &str, connections: usize) -> Backend {
-        let mut backend = Backend::new(addr).unwrap();
-        backend.metrics = Some(Arc::new(ActiveConnections::new(connections)));
+    fn backend_with_connections(addr: &str, connections: usize) -> AdaptiveBackend {
+        let backend = AdaptiveBackend::build(addr, 1).unwrap();
+        for _ in 0..connections {
+            backend.metrics.increment_active_connections();
+        }
         backend
     }
 
-    fn set(backends: impl IntoIterator<Item = Backend>) -> Arc<BTreeSet<Backend>> {
+    fn set(backends: impl IntoIterator<Item = AdaptiveBackend>) -> Arc<BTreeSet<AdaptiveBackend>> {
         Arc::new(backends.into_iter().collect())
     }
 

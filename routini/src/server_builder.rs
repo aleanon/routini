@@ -10,7 +10,7 @@ use color_eyre::eyre::{Result, eyre};
 use matchit::Router;
 use pingora::{
     listeners::tls::TlsSettings,
-    prelude::{HttpPeer, background_service},
+    prelude::background_service,
     proxy::http_proxy_service,
     server::{Server, configuration::ServerConf},
     services::listening::Service,
@@ -19,9 +19,10 @@ use regex::Regex;
 
 use crate::{
     adaptive_loadbalancer::{
-        AdaptiveLoadBalancer, decision_engine::AdaptiveDecisionEngine, options::AdaptiveLbOpt,
+        AdaptiveBackend, AdaptiveBackends, AdaptiveLoadBalancer,
+        decision_engine::AdaptiveDecisionEngine, options::AdaptiveLbOpt,
     },
-    load_balancing::{Backend, Backends, discovery::Static, strategy::Adaptive},
+    load_balancing::{Backends, discovery::Static, strategy::Adaptive},
     proxy::{Proxy, RouteValue},
     reload::{RouteRegistry, spawn_reload_watcher},
     route::RouteRuntime,
@@ -74,7 +75,7 @@ pub fn proxy_server(listener: TcpListener) -> ServerBuilder {
 
 pub struct Route {
     pub path: String,
-    pub backends: Backends,
+    pub backends: AdaptiveBackends,
     /// Full tuning for the route's adaptive load balancer. `starting_strategy`,
     /// `max_iterations` and `health_check_interval` are also adjustable via the builder methods.
     pub lb_options: AdaptiveLbOpt,
@@ -159,15 +160,12 @@ impl Route {
 
     fn build_backend_set(
         backends: impl IntoIterator<Item = (String, usize)>,
-    ) -> Result<BTreeSet<Backend>> {
+    ) -> Result<BTreeSet<AdaptiveBackend>> {
         let backends = backends
             .into_iter()
             .map(|(addr, weight)| {
-                let mut backend = Backend::new_with_weight(&addr, weight.max(1))
-                    .expect("Invalid backend address");
-                let http_peer = HttpPeer::new(backend.addr.clone(), false, String::new());
-                backend.ext.insert(http_peer);
-                backend
+                // `build` constructs the default plain-HTTP peer and `AdaptiveStrategyMetrics`.
+                AdaptiveBackend::build(&addr, weight.max(1)).expect("Invalid backend address")
             })
             .collect::<BTreeSet<_>>();
 

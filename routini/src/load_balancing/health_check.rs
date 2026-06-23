@@ -14,7 +14,7 @@
 
 //! Health Check interface and methods.
 
-use super::Backend;
+use super::{Backend, Metrics, NoMetric};
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use pingora::ErrorType::CustomCode;
@@ -22,6 +22,7 @@ use pingora::connectors::TransportConnector;
 use pingora::connectors::http::Connector as HttpConnector;
 use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::prelude::HttpPeer;
+use pingora::protocols::l4::socket::SocketAddr;
 use pingora::upstreams::peer::{BasicPeer, Peer};
 use pingora::{Error, Result};
 use std::sync::Arc;
@@ -31,28 +32,31 @@ use std::time::Duration;
 /// this is what's used for our health observation callback.
 #[async_trait]
 pub trait HealthObserve {
-    /// Observes the health of a [Backend], can be used for monitoring purposes.
-    async fn observe(&self, target: &Backend, healthy: bool);
+    /// Observes the health of a backend (by address), can be used for monitoring purposes.
+    async fn observe(&self, addr: &SocketAddr, healthy: bool);
 }
-/// Provided to a [HealthCheck] to observe changes to [Backend] health.
+/// Provided to a [HealthCheck] to observe changes to backend health.
 pub type HealthObserveCallback = Box<dyn HealthObserve + Send + Sync>;
 
-/// Provided to a [HealthCheck] to fetch [Backend] summary for detailed logging.
-pub type BackendSummary = Box<dyn Fn(&Backend) -> String + Send + Sync>;
+/// Provided to a [HealthCheck] to fetch a backend summary (by address) for detailed logging.
+pub type BackendSummary = Box<dyn Fn(&SocketAddr) -> String + Send + Sync>;
 
-/// [HealthCheck] is the interface to implement health check for backends
+/// [HealthCheck] is the interface to implement health check for backends.
+///
+/// Generic over the backend metrics type `M` so it can probe `Backend<M>`; the checks themselves
+/// only use the backend address, so concrete checks impl this for all `M`.
 #[async_trait]
-pub trait HealthCheck {
+pub trait HealthCheck<M: Metrics = NoMetric> {
     /// Check the given backend.
     ///
     /// `Ok(())`` if the check passes, otherwise the check fails.
-    async fn check(&self, target: &Backend) -> Result<()>;
+    async fn check(&self, target: &Backend<M>) -> Result<()>;
 
     /// Called when the health changes for a [Backend].
-    async fn health_status_change(&self, _target: &Backend, _healthy: bool) {}
+    async fn health_status_change(&self, _target: &Backend<M>, _healthy: bool) {}
 
     /// Called when a detailed [Backend] summary is needed.
-    fn backend_summary(&self, target: &Backend) -> String {
+    fn backend_summary(&self, target: &Backend<M>) -> String {
         format!("{target:?}")
     }
 
@@ -124,7 +128,7 @@ impl TcpHealthCheck {
 }
 
 #[async_trait]
-impl HealthCheck for TcpHealthCheck {
+impl<M: Metrics> HealthCheck<M> for TcpHealthCheck {
     fn health_threshold(&self, success: bool) -> usize {
         if success {
             self.consecutive_success
@@ -133,15 +137,15 @@ impl HealthCheck for TcpHealthCheck {
         }
     }
 
-    async fn check(&self, target: &Backend) -> Result<()> {
+    async fn check(&self, target: &Backend<M>) -> Result<()> {
         let mut peer = self.peer_template.clone();
         peer._address = target.addr.clone();
         self.connector.get_stream(&peer).await.map(|_| {})
     }
 
-    async fn health_status_change(&self, target: &Backend, healthy: bool) {
+    async fn health_status_change(&self, target: &Backend<M>, healthy: bool) {
         if let Some(callback) = &self.health_changed_callback {
-            callback.observe(target, healthy).await;
+            callback.observe(&target.addr, healthy).await;
         }
     }
 }
@@ -224,14 +228,14 @@ impl HttpHealthCheck {
 
     pub fn set_backend_summary<F>(&mut self, callback: F)
     where
-        F: Fn(&Backend) -> String + Send + Sync + 'static,
+        F: Fn(&SocketAddr) -> String + Send + Sync + 'static,
     {
         self.backend_summary_callback = Some(Box::new(callback));
     }
 }
 
 #[async_trait]
-impl HealthCheck for HttpHealthCheck {
+impl<M: Metrics> HealthCheck<M> for HttpHealthCheck {
     fn health_threshold(&self, success: bool) -> usize {
         if success {
             self.consecutive_success
@@ -240,7 +244,7 @@ impl HealthCheck for HttpHealthCheck {
         }
     }
 
-    async fn check(&self, target: &Backend) -> Result<()> {
+    async fn check(&self, target: &Backend<M>) -> Result<()> {
         let mut peer = self.peer_template.clone();
         peer._address = target.addr.clone();
         if let Some(port) = self.port_override {
@@ -283,14 +287,14 @@ impl HealthCheck for HttpHealthCheck {
 
         Ok(())
     }
-    async fn health_status_change(&self, target: &Backend, healthy: bool) {
+    async fn health_status_change(&self, target: &Backend<M>, healthy: bool) {
         if let Some(callback) = &self.health_changed_callback {
-            callback.observe(target, healthy).await;
+            callback.observe(&target.addr, healthy).await;
         }
     }
-    fn backend_summary(&self, target: &Backend) -> String {
+    fn backend_summary(&self, target: &Backend<M>) -> String {
         if let Some(callback) = &self.backend_summary_callback {
-            callback(target)
+            callback(&target.addr)
         } else {
             format!("{target:?}")
         }
@@ -382,27 +386,17 @@ mod test {
 
     use super::*;
     use async_trait::async_trait;
-    use pingora::{lb::Extensions, protocols::l4::socket::SocketAddr};
+    use pingora::protocols::l4::socket::SocketAddr;
 
     #[tokio::test]
     async fn test_tcp_check() {
         let tcp_check = TcpHealthCheck::default();
 
-        let backend = Backend {
-            addr: SocketAddr::Inet("1.1.1.1:80".parse().unwrap()),
-            weight: 1,
-            ext: Extensions::new(),
-            metrics: None,
-        };
+        let backend = Backend::new("1.1.1.1:80").unwrap();
 
         assert!(tcp_check.check(&backend).await.is_ok());
 
-        let backend = Backend {
-            addr: SocketAddr::Inet("1.1.1.1:79".parse().unwrap()),
-            weight: 1,
-            ext: Extensions::new(),
-            metrics: None,
-        };
+        let backend = Backend::new("1.1.1.1:79").unwrap();
 
         assert!(tcp_check.check(&backend).await.is_err());
     }
@@ -448,12 +442,7 @@ mod test {
             }
         }));
 
-        let backend = Backend {
-            addr: SocketAddr::Inet("1.1.1.1:80".parse().unwrap()),
-            weight: 1,
-            ext: Extensions::new(),
-            metrics: None,
-        };
+        let backend = Backend::new("1.1.1.1:80").unwrap();
 
         http_check.check(&backend).await.unwrap();
 
@@ -467,7 +456,7 @@ mod test {
         }
         #[async_trait]
         impl HealthObserve for Observe {
-            async fn observe(&self, _target: &Backend, healthy: bool) {
+            async fn observe(&self, _addr: &SocketAddr, healthy: bool) {
                 if !healthy {
                     self.unhealthy_count.fetch_add(1, Ordering::Relaxed);
                 }

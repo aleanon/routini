@@ -18,6 +18,7 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use pingora::Result;
 use pingora::lb::Extensions;
+use pingora::prelude::HttpPeer;
 use pingora::protocols::l4::socket::SocketAddr;
 use std::io::Result as IoResult;
 use std::net::ToSocketAddrs;
@@ -26,28 +27,28 @@ use std::{
     sync::Arc,
 };
 
-use crate::load_balancing::Backend;
+use crate::load_balancing::{Backend, Metrics, NoMetric};
 
 /// [ServiceDiscovery] is the interface to discover [Backend]s.
 #[async_trait]
-pub trait ServiceDiscovery {
+pub trait ServiceDiscovery<M: Metrics = NoMetric> {
     /// Return the discovered collection of backends.
     /// And *optionally* whether these backends are enabled to serve or not in a `HashMap`. Any backend
     /// that is not explicitly in the set is considered enabled.
-    async fn discover(&self) -> Result<(BTreeSet<Backend>, HashMap<u64, bool>)>;
+    async fn discover(&self) -> Result<(BTreeSet<Backend<M>>, HashMap<u64, bool>)>;
 }
 
 // TODO: add DNS base discovery
 
 /// A static collection of [Backend]s for service discovery.
 #[derive(Default)]
-pub struct Static {
-    backends: ArcSwap<BTreeSet<Backend>>,
+pub struct Static<M: Metrics = NoMetric> {
+    backends: ArcSwap<BTreeSet<Backend<M>>>,
 }
 
-impl Static {
+impl<M: Metrics> Static<M> {
     /// Create a new boxed [Static] service discovery with the given backends.
-    pub fn new(backends: BTreeSet<Backend>) -> Box<Self> {
+    pub fn new(backends: BTreeSet<Backend<M>>) -> Box<Self> {
         Box::new(Static {
             backends: ArcSwap::new(Arc::new(backends)),
         })
@@ -60,11 +61,15 @@ impl Static {
     {
         let mut upstreams = BTreeSet::new();
         for addrs in iter.into_iter() {
-            let addrs = addrs.to_socket_addrs()?.map(|addr| Backend {
-                addr: SocketAddr::Inet(addr),
-                weight: 1,
-                ext: Extensions::new(),
-                metrics: None,
+            let addrs = addrs.to_socket_addrs()?.map(|addr| {
+                let addr = SocketAddr::Inet(addr);
+                Backend {
+                    peer: HttpPeer::new(addr.clone(), false, String::new()),
+                    addr,
+                    weight: 1,
+                    ext: Extensions::new(),
+                    metrics: M::default(),
+                }
             });
             upstreams.extend(addrs);
         }
@@ -72,7 +77,7 @@ impl Static {
     }
 
     /// return the collection to backends
-    pub fn get(&self) -> BTreeSet<Backend> {
+    pub fn get(&self) -> BTreeSet<Backend<M>> {
         BTreeSet::clone(&self.backends.load())
     }
 
@@ -81,19 +86,19 @@ impl Static {
 
     // TODO: take an impl iter
     #[allow(dead_code)]
-    pub(crate) fn set(&self, backends: BTreeSet<Backend>) {
+    pub(crate) fn set(&self, backends: BTreeSet<Backend<M>>) {
         self.backends.store(backends.into())
     }
 
     #[allow(dead_code)]
-    pub(crate) fn add(&self, backend: Backend) {
+    pub(crate) fn add(&self, backend: Backend<M>) {
         let mut new = self.get();
         new.insert(backend);
         self.set(new)
     }
 
     #[allow(dead_code)]
-    pub(crate) fn remove(&self, backend: &Backend) {
+    pub(crate) fn remove(&self, backend: &Backend<M>) {
         let mut new = self.get();
         new.remove(backend);
         self.set(new)
@@ -101,8 +106,8 @@ impl Static {
 }
 
 #[async_trait]
-impl ServiceDiscovery for Static {
-    async fn discover(&self) -> Result<(BTreeSet<Backend>, HashMap<u64, bool>)> {
+impl<M: Metrics> ServiceDiscovery<M> for Static<M> {
+    async fn discover(&self) -> Result<(BTreeSet<Backend<M>>, HashMap<u64, bool>)> {
         // no readiness
         let health = HashMap::new();
         Ok((self.get(), health))

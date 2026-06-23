@@ -1,9 +1,10 @@
 use arc_swap::ArcSwap;
-use derivative::Derivative;
 use futures::FutureExt;
 use pingora::lb::Extensions;
+use pingora::prelude::HttpPeer;
 use pingora::protocols::l4::socket::SocketAddr;
 use pingora::{ErrorType, OrErr, Result};
+use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::{Debug, Display};
@@ -26,7 +27,11 @@ use strategy::BackendSelection;
 use crate::load_balancing::strategy::Strategy;
 use crate::load_balancing::strategy::utils::UniqueIterator;
 
-pub trait Metrics: Send + Sync + Debug {
+/// Per-backend runtime metrics. Implementors carry shared state behind an `Arc` so that cloning a
+/// [`Backend`] (which the selectors and `select()` do) keeps all clones pointing at the same
+/// counters. The `Default` + `Clone` supertraits let [`Backends`] mint and preserve metrics
+/// without dynamic dispatch — `Backend<M>` monomorphizes per concrete `M`.
+pub trait Metrics: Clone + Default + Send + Sync + Debug + 'static {
     fn increment_active_connections(&self) {}
     fn decrement_active_connections(&self) {}
     fn record_latency(&self, _latency: Duration, _alpha: f32) {}
@@ -38,41 +43,16 @@ pub trait Metrics: Send + Sync + Debug {
     }
 }
 
-pub type BackendMetrics = Option<Arc<dyn Metrics>>;
+/// Zero-sized metrics implementation: the default `M` when a backend tracks nothing. Every method
+/// is a no-op and compiles away entirely (no `Arc`, no `Option`, no branch).
+#[derive(Clone, Copy, Default, Debug)]
+pub struct NoMetric;
 
-impl Metrics for BackendMetrics {
-    fn increment_active_connections(&self) {
-        if let Some(metrics) = &self {
-            metrics.increment_active_connections();
-        }
-    }
+impl Metrics for NoMetric {}
 
-    fn decrement_active_connections(&self) {
-        if let Some(metrics) = &self {
-            metrics.decrement_active_connections();
-        }
-    }
-
-    fn record_latency(&self, latency: Duration, alpha: f32) {
-        if let Some(metrics) = &self {
-            metrics.record_latency(latency, alpha);
-        }
-    }
-
-    fn active_connections(&self) -> Option<usize> {
-        self.as_ref()
-            .and_then(|metrics| metrics.active_connections())
-    }
-
-    fn average_latency(&self) -> Option<f32> {
-        self.as_ref().and_then(|metrics| metrics.average_latency())
-    }
-}
-
-/// [Backend] represents a server to proxy or connect to.
-#[derive(Derivative)]
-#[derivative(Clone, Hash, PartialEq, PartialOrd, Eq, Ord, Debug)]
-pub struct Backend {
+/// [Backend] represents a server to proxy or connect to, generic over its metrics type `M`.
+#[derive(Clone, Debug)]
+pub struct Backend<M: Metrics = NoMetric> {
     /// The address to the backend server.
     pub addr: SocketAddr,
     /// The relative weight of the server. Load balancing algorithms will
@@ -81,40 +61,68 @@ pub struct Backend {
 
     /// The extension field to put arbitrary data to annotate the Backend.
     /// The data added here is opaque to this crate hence the data is ignored by
-    /// functionalities of this crate. For example, two backends with the same
-    /// [SocketAddr] and the same weight but different `ext` data are considered
-    /// identical.
-    /// See [Extensions] for how to add and read the data.
-    #[derivative(PartialEq = "ignore")]
-    #[derivative(PartialOrd = "ignore")]
-    #[derivative(Hash = "ignore")]
-    #[derivative(Ord = "ignore")]
+    /// functionalities of this crate. See [Extensions] for how to add and read the data.
     pub ext: Extensions,
-    #[derivative(PartialEq = "ignore")]
-    #[derivative(PartialOrd = "ignore")]
-    #[derivative(Hash = "ignore")]
-    #[derivative(Ord = "ignore")]
-    pub metrics: BackendMetrics,
+
+    /// The upstream peer used to connect to this backend (default plain-HTTP to `addr`).
+    pub peer: HttpPeer,
+
+    /// Per-backend metrics. Identity (`Eq`/`Ord`/`Hash`) ignores this field.
+    pub metrics: M,
 }
 
-impl Backend {
-    /// Create a new [Backend] with `weight` 1. The function will try to parse
-    ///  `addr` into a [std::net::SocketAddr].
+// Identity is `(addr, weight)` only; `ext`, `peer` and `metrics` are intentionally excluded so two
+// backends with the same address+weight are considered the same (and so `M` needs no Ord/Hash/Eq).
+impl<M: Metrics> PartialEq for Backend<M> {
+    fn eq(&self, other: &Self) -> bool {
+        self.addr == other.addr && self.weight == other.weight
+    }
+}
+impl<M: Metrics> Eq for Backend<M> {}
+impl<M: Metrics> PartialOrd for Backend<M> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl<M: Metrics> Ord for Backend<M> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        (&self.addr, self.weight).cmp(&(&other.addr, other.weight))
+    }
+}
+impl<M: Metrics> Hash for Backend<M> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.addr.hash(state);
+        self.weight.hash(state);
+    }
+}
+
+impl Backend<NoMetric> {
+    /// Create a new [Backend] with `weight` 1 and [`NoMetric`].
     pub fn new(addr: &str) -> Result<Self> {
         Self::new_with_weight(addr, 1)
     }
 
-    /// Creates a new [Backend] with the specified `weight`. The function will try to parse
-    /// `addr` into a [std::net::SocketAddr].
+    /// Create a new [Backend] with the specified `weight` and [`NoMetric`].
     pub fn new_with_weight(addr: &str, weight: usize) -> Result<Self> {
-        let addr = addr
+        Self::build(addr, weight)
+    }
+}
+
+impl<M: Metrics> Backend<M> {
+    /// Create a backend with the given weight and a default `M`. The peer defaults to plain HTTP
+    /// to `addr`. The function will try to parse `addr` into a [std::net::SocketAddr].
+    pub fn build(addr: &str, weight: usize) -> Result<Self> {
+        let inet: std::net::SocketAddr = addr
             .parse()
             .or_err(ErrorType::InternalError, "invalid socket addr")?;
+        let addr = SocketAddr::Inet(inet);
+        let peer = HttpPeer::new(addr.clone(), false, String::new());
         Ok(Backend {
-            addr: SocketAddr::Inet(addr),
+            addr,
             weight,
             ext: Extensions::new(),
-            metrics: None,
+            peer,
+            metrics: M::default(),
         })
         // TODO: UDS
     }
@@ -126,7 +134,7 @@ impl Backend {
     }
 }
 
-impl std::ops::Deref for Backend {
+impl<M: Metrics> std::ops::Deref for Backend<M> {
     type Target = SocketAddr;
 
     fn deref(&self) -> &Self::Target {
@@ -134,13 +142,13 @@ impl std::ops::Deref for Backend {
     }
 }
 
-impl std::ops::DerefMut for Backend {
+impl<M: Metrics> std::ops::DerefMut for Backend<M> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.addr
     }
 }
 
-impl std::net::ToSocketAddrs for Backend {
+impl<M: Metrics> std::net::ToSocketAddrs for Backend<M> {
     type Iter = std::iter::Once<std::net::SocketAddr>;
 
     fn to_socket_addrs(&self) -> std::io::Result<Self::Iter> {
@@ -153,18 +161,18 @@ impl std::net::ToSocketAddrs for Backend {
 /// It includes a service discovery method (static or dynamic) to discover all
 /// the available backends as well as an optional health check method to probe the liveness
 /// of each backend.
-pub struct Backends {
-    discovery: Box<dyn ServiceDiscovery + Send + Sync + 'static>,
-    health_check: Option<Arc<dyn health_check::HealthCheck + Send + Sync + 'static>>,
-    backends: ArcSwap<BTreeSet<Backend>>,
+pub struct Backends<M: Metrics = NoMetric> {
+    discovery: Box<dyn ServiceDiscovery<M> + Send + Sync + 'static>,
+    health_check: Option<Arc<dyn health_check::HealthCheck<M> + Send + Sync + 'static>>,
+    backends: ArcSwap<BTreeSet<Backend<M>>>,
     health: ArcSwap<HashMap<u64, Health>>,
 }
 
-impl Backends {
+impl<M: Metrics> Backends<M> {
     /// Create a new [Backends] with the given [ServiceDiscovery] implementation.
     ///
     /// The health check method is by default empty.
-    pub fn new(discovery: Box<dyn ServiceDiscovery + Send + Sync + 'static>) -> Self {
+    pub fn new(discovery: Box<dyn ServiceDiscovery<M> + Send + Sync + 'static>) -> Self {
         Self {
             discovery,
             health_check: None,
@@ -176,7 +184,7 @@ impl Backends {
     /// Set the health check method. See [health_check] for the methods provided.
     pub fn set_health_check(
         &mut self,
-        hc: Box<dyn health_check::HealthCheck + Send + Sync + 'static>,
+        hc: Box<dyn health_check::HealthCheck<M> + Send + Sync + 'static>,
     ) {
         self.health_check = Some(hc.into())
     }
@@ -186,13 +194,13 @@ impl Backends {
     /// from the current one so that the caller can update the selector accordingly.
     fn do_update<F, S>(
         &self,
-        strategy: &S,
-        new_backends: BTreeSet<Backend>,
+        _strategy: &S,
+        new_backends: BTreeSet<Backend<M>>,
         enablement: HashMap<u64, bool>,
         callback: F,
     ) where
-        F: Fn(Arc<BTreeSet<Backend>>),
-        S: Strategy,
+        F: Fn(Arc<BTreeSet<Backend<M>>>),
+        S: Strategy<M>,
     {
         if (**self.backends.load()) != new_backends {
             let old_backends = self.backends.load();
@@ -207,7 +215,7 @@ impl Backends {
                     backend.ext.extend(old_backend.ext.clone());
                     backend.metrics = old_backend.metrics.clone();
                 } else {
-                    backend.metrics = strategy.metrics();
+                    backend.metrics = M::default();
                 }
 
                 let hash_key = backend.hash_key();
@@ -249,7 +257,7 @@ impl Backends {
     /// This function returns true when the health check is unset but the backend is enabled.
     /// When the health check is set, this function will return false for the `backend` it
     /// doesn't know.
-    pub fn ready(&self, backend: &Backend) -> bool {
+    pub fn ready(&self, backend: &Backend<M>) -> bool {
         self.health
             .load()
             .get(&backend.hash_key())
@@ -264,7 +272,7 @@ impl Backends {
     /// to stop a backend from accepting traffic when it is still healthy.
     ///
     /// This method is noop when the given backend doesn't exist in the service discovery.
-    pub fn set_enable(&self, backend: &Backend, enabled: bool) {
+    pub fn set_enable(&self, backend: &Backend<M>, enabled: bool) {
         // this should always be Some(_) because health is always populated during update
         if let Some(h) = self.health.load().get(&backend.hash_key()) {
             h.enable(enabled)
@@ -272,7 +280,7 @@ impl Backends {
     }
 
     /// Return the collection of the backends.
-    pub fn get_backend(&self) -> Arc<BTreeSet<Backend>> {
+    pub fn get_backend(&self) -> Arc<BTreeSet<Backend<M>>> {
         self.backends.load_full()
     }
 
@@ -282,8 +290,8 @@ impl Backends {
     /// from the current one so that the caller can update the selector accordingly.
     pub async fn update<F, S>(&self, strategy: &S, callback: F) -> Result<()>
     where
-        F: Fn(Arc<BTreeSet<Backend>>),
-        S: Strategy,
+        F: Fn(Arc<BTreeSet<Backend<M>>>),
+        S: Strategy<M>,
     {
         let (new_backends, enablement) = self.discovery.discover().await?;
         self.do_update(strategy, new_backends, enablement, callback);
@@ -298,9 +306,9 @@ impl Backends {
         use log::{info, warn};
         use pingora_runtime::current_handle;
 
-        async fn check_and_report(
-            backend: &Backend,
-            check: &Arc<dyn HealthCheck + Send + Sync>,
+        async fn check_and_report<M: Metrics>(
+            backend: &Backend<M>,
+            check: &Arc<dyn HealthCheck<M> + Send + Sync>,
             health_table: &HashMap<u64, Health>,
         ) {
             let errored = check.check(backend).await.err();
@@ -350,11 +358,12 @@ impl Backends {
 ///
 /// In order to run service discovery and health check at the designated frequencies, the [LoadBalancer]
 /// needs to be run as a [pingora_core::services::background::BackgroundService].
-pub struct LoadBalancer<S>
+pub struct LoadBalancer<S, M = NoMetric>
 where
-    S: Strategy,
+    S: Strategy<M>,
+    M: Metrics,
 {
-    backends: Backends,
+    backends: Backends<M>,
     /// Controls what Strategy should be used when rebuilding the selector after an update.
     /// Usually a zero sized type that implements [Strategy]
     /// Uses RwLock to ensure there are no race conditions between the `update_strategy` and `update` methods.
@@ -372,9 +381,10 @@ where
     pub parallel_health_check: bool,
 }
 
-impl<S> LoadBalancer<S>
+impl<S, M> LoadBalancer<S, M>
 where
-    S: Strategy,
+    S: Strategy<M>,
+    M: Metrics,
 {
     /// Build a [LoadBalancer] with static backends created from the iter.
     ///
@@ -406,27 +416,17 @@ where
     }
 
     /// Build a [LoadBalancer] with the given [Backends].
-    pub fn from_backends(backends: Backends) -> Self
+    pub fn from_backends(backends: Backends<M>) -> Self
     where
         S: Default,
     {
         Self::from_backends_with_strategy(backends, S::default())
     }
 
-    pub fn from_backends_with_strategy(mut backends: Backends, strategy: S) -> Self {
-        let mut backends_ref = backends.backends.into_inner();
-        let backends_mut = Arc::make_mut(&mut backends_ref);
-        let new_backends = std::mem::take(backends_mut)
-            .into_iter()
-            .map(|mut b| {
-                b.metrics = strategy.metrics();
-                b
-            })
-            .collect();
-
-        backends.backends = ArcSwap::new(Arc::new(new_backends));
-
-        let selector = strategy.build_backend_selector(&backends_ref);
+    pub fn from_backends_with_strategy(backends: Backends<M>, strategy: S) -> Self {
+        // Backends already carry their `M` (constructed with `M::default()` during discovery), so
+        // there's no metrics reset to do here — just build the initial selector.
+        let selector = strategy.build_backend_selector(&backends.backends.load());
         LoadBalancer {
             backends,
             strategy: RwLock::new(strategy),
@@ -502,7 +502,7 @@ where
     /// algorithm like Ketama hashing, the search for the next backend is linear and could take
     /// a lot steps.
     // TODO: consider remove `max_iterations` as users have no idea how to set it.
-    pub fn select(&self, key: &[u8], max_iterations: usize) -> Option<Backend> {
+    pub fn select(&self, key: &[u8], max_iterations: usize) -> Option<Backend<M>> {
         self.select_with(key, max_iterations, |_, health| health)
     }
 
@@ -513,9 +513,9 @@ where
     /// backend. The function can do things like ignoring the internal health checks or skipping this backend
     /// because it failed before. The `accept` function is called multiple times iterating over backends
     /// until it returns `true`.
-    pub fn select_with<F>(&self, key: &[u8], max_iterations: usize, accept: F) -> Option<Backend>
+    pub fn select_with<F>(&self, key: &[u8], max_iterations: usize, accept: F) -> Option<Backend<M>>
     where
-        F: Fn(&Backend, bool) -> bool,
+        F: Fn(&Backend<M>, bool) -> bool,
     {
         let selection = self.selector.load();
         let mut iter = UniqueIterator::new(selection.iter(key), max_iterations);
@@ -530,13 +530,13 @@ where
     /// Set the health check method. See [health_check].
     pub fn set_health_check(
         &mut self,
-        hc: Box<dyn health_check::HealthCheck + Send + Sync + 'static>,
+        hc: Box<dyn health_check::HealthCheck<M> + Send + Sync + 'static>,
     ) {
         self.backends.set_health_check(hc);
     }
 
     /// Access the [Backends] of this [LoadBalancer]
-    pub fn backends(&self) -> &Backends {
+    pub fn backends(&self) -> &Backends<M> {
         &self.backends
     }
 }

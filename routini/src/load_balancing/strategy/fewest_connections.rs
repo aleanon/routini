@@ -8,30 +8,46 @@ use std::{
 };
 
 use crate::load_balancing::{
-    Backend, BackendMetrics, Metrics,
+    Backend, Metrics, NoMetric,
     strategy::{BackendIter, BackendSelection, Strategy},
 };
 
-pub type ActiveConnections = AtomicUsize;
+/// Active-connection counter shared across `Backend` clones via an internal `Arc`.
+#[derive(Clone, Debug, Default)]
+pub struct ActiveConnections(Arc<AtomicUsize>);
+
+impl ActiveConnections {
+    pub fn new(initial: usize) -> Self {
+        Self(Arc::new(AtomicUsize::new(initial)))
+    }
+}
+
+impl Metrics for ActiveConnections {
+    fn increment_active_connections(&self) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn decrement_active_connections(&self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    fn active_connections(&self) -> Option<usize> {
+        Some(self.0.load(Ordering::Relaxed))
+    }
+}
 
 #[derive(Default, Clone, PartialEq)]
 pub struct FewestConnections;
 
-impl Strategy for FewestConnections {
-    type BackendSelector = FewestConnectionsSelector;
+impl<M: Metrics> Strategy<M> for FewestConnections {
+    type BackendSelector = FewestConnectionsSelector<M>;
 
-    fn metrics(&self) -> BackendMetrics {
-        Some(Arc::new(ActiveConnections::new(0)))
-    }
-
-    fn build_backend_selector(&self, backends: &BTreeSet<Backend>) -> Self::BackendSelector {
+    fn build_backend_selector(&self, backends: &BTreeSet<Backend<M>>) -> Self::BackendSelector {
         let mut backends_with_metrics = Vec::with_capacity(backends.len());
 
         for backend in backends.iter() {
-            let Some(nr_of_connections) = backend.metrics.active_connections() else {
-                log::error!("Missing metrics implementation for FewestConnections");
-                unreachable!("Implementation missing");
-            };
+            // Backends whose `M` doesn't track connections report 0 and sort as least-loaded.
+            let nr_of_connections = backend.metrics.active_connections().unwrap_or(0);
             backends_with_metrics.push((backend, nr_of_connections));
         }
 
@@ -52,25 +68,25 @@ impl Strategy for FewestConnections {
     }
 }
 
-pub struct FewestConnectionsSelector {
-    backends: Box<[Backend]>,
+pub struct FewestConnectionsSelector<M: Metrics = NoMetric> {
+    backends: Box<[Backend<M>]>,
 }
 
-impl BackendSelection for FewestConnectionsSelector {
-    type Iter = FewestConnectionsIter;
+impl<M: Metrics> BackendSelection<M> for FewestConnectionsSelector<M> {
+    type Iter = FewestConnectionsIter<M>;
 
     fn iter(self: &Arc<Self>, key: &[u8]) -> Self::Iter {
         FewestConnectionsIter::new(self.clone(), key)
     }
 }
 
-pub struct FewestConnectionsIter {
-    least_connections: Arc<FewestConnectionsSelector>,
+pub struct FewestConnectionsIter<M: Metrics = NoMetric> {
+    least_connections: Arc<FewestConnectionsSelector<M>>,
     index: usize,
 }
 
-impl FewestConnectionsIter {
-    fn new(least_connections: Arc<FewestConnectionsSelector>, _key: &[u8]) -> Self {
+impl<M: Metrics> FewestConnectionsIter<M> {
+    fn new(least_connections: Arc<FewestConnectionsSelector<M>>, _key: &[u8]) -> Self {
         Self {
             least_connections,
             index: 0,
@@ -78,25 +94,11 @@ impl FewestConnectionsIter {
     }
 }
 
-impl BackendIter for FewestConnectionsIter {
-    fn next(&mut self) -> Option<&Backend> {
+impl<M: Metrics> BackendIter<M> for FewestConnectionsIter<M> {
+    fn next(&mut self) -> Option<&Backend<M>> {
         let backend = self.least_connections.backends.get(self.index)?;
         self.index += 1;
         Some(backend)
-    }
-}
-
-impl Metrics for ActiveConnections {
-    fn increment_active_connections(&self) {
-        self.fetch_add(1, Ordering::Relaxed);
-    }
-
-    fn decrement_active_connections(&self) {
-        self.fetch_sub(1, Ordering::Relaxed);
-    }
-
-    fn active_connections(&self) -> Option<usize> {
-        Some(self.load(Ordering::Relaxed))
     }
 }
 
@@ -104,29 +106,23 @@ impl Metrics for ActiveConnections {
 mod tests {
     use super::*;
 
-    fn create_backend_with_connections(addr: &str) -> Backend {
-        let mut backend = Backend::new(addr).unwrap();
-        backend.metrics = Some(Arc::new(ActiveConnections::new(0)));
-        backend
+    fn create_backend_with_connections(addr: &str) -> Backend<ActiveConnections> {
+        Backend::build(addr, 1).unwrap()
     }
 
-    fn set_backend_connections(backend: &mut Backend, count: usize) {
-        backend.metrics = Some(Arc::new(ActiveConnections::new(count)));
+    fn set_backend_connections(backend: &mut Backend<ActiveConnections>, count: usize) {
+        backend.metrics = ActiveConnections::new(count);
     }
 
-    fn increment_backend_connection(backend: &Backend) {
-        if let Some(metrics) = &backend.metrics {
-            metrics.increment_active_connections();
-        }
+    fn increment_backend_connection(backend: &Backend<ActiveConnections>) {
+        backend.metrics.increment_active_connections();
     }
 
-    fn decrement_backend_connection(backend: &Backend) {
-        if let Some(metrics) = &backend.metrics {
-            metrics.decrement_active_connections();
-        }
+    fn decrement_backend_connection(backend: &Backend<ActiveConnections>) {
+        backend.metrics.decrement_active_connections();
     }
 
-    fn get_backend_connections(backend: &Backend) -> Option<usize> {
+    fn get_backend_connections(backend: &Backend<ActiveConnections>) -> Option<usize> {
         backend.metrics.active_connections()
     }
 
@@ -247,7 +243,7 @@ mod tests {
 
     #[test]
     fn test_empty_backends() {
-        let backends = BTreeSet::new();
+        let backends: BTreeSet<Backend<ActiveConnections>> = BTreeSet::new();
         let strategy = FewestConnections::default();
         let selector = Arc::new(strategy.build_backend_selector(&backends));
 
