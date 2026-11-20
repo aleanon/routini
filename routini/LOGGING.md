@@ -195,7 +195,6 @@ services:
     build: .
     ports:
       - "3500:3500"  # Main proxy
-      - "5000:5000"  # Strategy endpoint
       - "9090:9090"  # Prometheus
     environment:
       - RUST_LOG=info,routini=debug

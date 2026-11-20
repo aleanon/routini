@@ -287,7 +287,7 @@ impl Proxy {
         Ok(cached)
     }
 
-    /// Look up a path in the default router (used by the strategy endpoint and tests).
+    /// Look up a path in the default router (used by tests).
     pub fn route(&self, path: &str) -> Result<(&RouteValue, Option<String>)> {
         Self::route_in(&self.default_router, path)
     }

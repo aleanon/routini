@@ -5,6 +5,5 @@ pub mod proxy;
 pub mod reload;
 pub mod route;
 pub mod server_builder;
-pub mod set_strategy_endpoint;
 pub mod shutdown;
 pub mod utils;

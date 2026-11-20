@@ -5,10 +5,7 @@ use routini::{
     shutdown,
     utils::{
         config_loader::{CONFIG_PATH_ENV, DEFAULT_CONFIG_PATH, load_config_from},
-        constants::{
-            DEFAULT_LOG_JSON, DEFAULT_LOG_LEVEL_FILTER, DEFAULT_MAX_LOG_AGE_DAYS,
-            SET_STRATEGY_ENDPOINT_ADDRESS,
-        },
+        constants::{DEFAULT_LOG_JSON, DEFAULT_LOG_LEVEL_FILTER, DEFAULT_MAX_LOG_AGE_DAYS},
         tracing::{LogConfig, init_tracing_with_config},
     },
 };
@@ -73,13 +70,6 @@ fn main() -> Result<()> {
     for route in routes {
         builder = builder.add_route(route);
     }
-
-    let strategy_endpoint = config
-        .server
-        .set_strategy_endpoint
-        .clone()
-        .unwrap_or_else(|| SET_STRATEGY_ENDPOINT_ADDRESS.to_string());
-    builder = builder.set_strategy_endpoint(strategy_endpoint);
 
     if let Some(prometheus_address) = config.server.prometheus_address.clone() {
         builder = builder.prometheus_address(prometheus_address);

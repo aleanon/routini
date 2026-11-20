@@ -26,7 +26,6 @@ use crate::{
     proxy::{Proxy, RouteValue},
     reload::{RouteRegistry, spawn_reload_watcher},
     route::RouteRuntime,
-    set_strategy_endpoint::SetStrategyEndpoint,
     utils::constants::{
         DEFAULT_GRACE_PERIOD, DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT, DEFAULT_PATH_CACHE_CAPACITY,
         DEFAULT_WILDCARD_IDENTIFIER, PROMETHEUS_ENDPOINT_ADDRESS,
@@ -61,7 +60,6 @@ pub fn proxy_server(listener: TcpListener) -> ServerBuilder {
     ServerBuilder {
         address,
         routes: Vec::new(),
-        set_strategy_endpoint: None,
         server_config: None,
         tls: None,
         prometheus_address: None,
@@ -210,7 +208,6 @@ impl Route {
 pub struct ServerBuilder {
     address: String,
     routes: Vec<Route>,
-    set_strategy_endpoint: Option<String>,
     server_config: Option<ServerConf>,
     tls: Option<TlsConfig>,
     prometheus_address: Option<String>,
@@ -224,11 +221,6 @@ pub struct ServerBuilder {
 impl ServerBuilder {
     pub fn add_route(mut self, route: impl Into<Route>) -> Self {
         self.routes.push(route.into());
-        self
-    }
-
-    pub fn set_strategy_endpoint(mut self, addr: String) -> Self {
-        self.set_strategy_endpoint = Some(addr);
         self
     }
 
@@ -379,11 +371,6 @@ impl ServerBuilder {
 
         if let Some(path) = self.reload_config_path {
             spawn_reload_watcher(path, Arc::new(registry));
-        }
-
-        if let Some(endpoint_address) = self.set_strategy_endpoint {
-            let endpoint = SetStrategyEndpoint::service(router.clone(), &endpoint_address);
-            server.add_service(endpoint);
         }
 
         let mut router_service = http_proxy_service(&server.configuration, router);
