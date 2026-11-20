@@ -105,6 +105,16 @@ impl AdaptiveDecisionEngine {
     }
 }
 
+/// The threshold a ratio must fall to before an active strategy is left again.
+///
+/// Divergence ratios are `max / min`, so they are never below 1.0. The hysteresis factor is
+/// therefore applied to the part of the enter threshold above 1.0: with an enter threshold of 1.2
+/// and a factor of 0.75 the exit threshold is 1.15. Scaling the whole threshold (1.2 * 0.75 = 0.9)
+/// would put it below any reachable ratio and make the strategy impossible to leave.
+fn exit_threshold(enter: f32, factor: f32) -> f32 {
+    1.0 + (enter - 1.0) * factor
+}
+
 impl DecisionEngine for AdaptiveDecisionEngine {
     type Strategy = Adaptive;
 
@@ -134,7 +144,7 @@ impl DecisionEngine for AdaptiveDecisionEngine {
         if let Some((ratio, max)) = self.connection_divergence(backends) {
             if max >= self.min_nr_of_connections {
                 let threshold = if *current_strategy == Adaptive::FewestConnections {
-                    self.connections_divergence_ratio * exit
+                    exit_threshold(self.connections_divergence_ratio, exit)
                 } else {
                     self.connections_divergence_ratio
                 };
@@ -147,7 +157,7 @@ impl DecisionEngine for AdaptiveDecisionEngine {
         // 2. Latency divergence: route more traffic to the faster backends.
         if let Some(ratio) = self.latency_divergence(backends) {
             let threshold = if *current_strategy == Adaptive::FastestServer {
-                self.latency_divergence_ratio * exit
+                exit_threshold(self.latency_divergence_ratio, exit)
             } else {
                 self.latency_divergence_ratio
             };
@@ -200,6 +210,47 @@ mod tests {
 
     fn set(backends: impl IntoIterator<Item = AdaptiveBackend>) -> Arc<BTreeSet<AdaptiveBackend>> {
         Arc::new(backends.into_iter().collect())
+    }
+
+    #[test]
+    fn fewest_connections_is_left_once_connections_even_out() {
+        let engine = engine();
+        // Default enter 1.2, exit 1.15. 24/20 = 1.2 is above the exit threshold: stays when
+        // active, while not entering from RoundRobin (not above the enter threshold).
+        let inside_band = set([
+            backend_with_connections("127.0.0.1:8080", 24),
+            backend_with_connections("127.0.0.1:8081", 20),
+        ]);
+        assert_eq!(
+            engine.evaluate_strategy(&Adaptive::FewestConnections, &inside_band),
+            Adaptive::FewestConnections
+        );
+        assert_eq!(
+            engine.evaluate_strategy(&Adaptive::RoundRobin, &inside_band),
+            Adaptive::RoundRobin
+        );
+        // Balanced: must fall back. With exit = 1.2 * 0.75 = 0.9 this stayed forever.
+        let balanced = set([
+            backend_with_connections("127.0.0.1:8080", 20),
+            backend_with_connections("127.0.0.1:8081", 20),
+        ]);
+        assert_eq!(
+            engine.evaluate_strategy(&Adaptive::FewestConnections, &balanced),
+            Adaptive::RoundRobin
+        );
+    }
+
+    #[test]
+    fn exit_threshold_stays_above_one() {
+        for (enter, factor, expected) in [
+            (1.2, 0.75, 1.15),
+            (2.0, 0.75, 1.75),
+            (2.0, 1.0, 2.0),
+            (2.0, 0.0, 1.0),
+        ] {
+            let got = exit_threshold(enter, factor);
+            assert!((got - expected).abs() < 1e-6, "{enter} * {factor}: {got}");
+        }
     }
 
     #[test]
@@ -258,12 +309,12 @@ mod tests {
     #[test]
     fn hysteresis_keeps_fastest_server_until_below_exit_threshold() {
         let engine = engine();
-        // latency_divergence_ratio default 2.0, exit factor 0.75 -> exit threshold 1.5.
-        // Ratio of 1.6 is below the enter threshold (2.0) but above the exit threshold (1.5),
+        // latency_divergence_ratio default 2.0, exit factor 0.75 -> exit threshold 1.75.
+        // Ratio of 1.8 is below the enter threshold (2.0) but above the exit threshold (1.75),
         // so an engine already in FastestServer must stay there, while one in RoundRobin must
         // not switch in.
         let backends = set([
-            backend_with_latency("127.0.0.1:8080", 16.0),
+            backend_with_latency("127.0.0.1:8080", 18.0),
             backend_with_latency("127.0.0.1:8081", 10.0),
         ]);
         assert_eq!(
