@@ -21,10 +21,19 @@ fn main() -> Result<()> {
     init_tracing_with_config(LogConfig::from_env()).expect("Failed to set up tracing");
     color_eyre::install().expect("Failed to install color_eyre");
 
+    // Never log the error text: a parse error contains the offending line, and .env lines are
+    // often secrets
     match dotenv {
         Ok(path) => tracing::info!(path = %path.display(), "Loaded environment file"),
         Err(err) if err.not_found() => {}
-        Err(err) => tracing::warn!("Failed to load .env file: {err}"),
+        Err(dotenvy::Error::LineParse(_, index)) => tracing::warn!(
+            position = index,
+            "Stopped loading .env at a line with invalid syntax, later lines are not applied (content not logged)"
+        ),
+        Err(dotenvy::Error::Io(err)) => {
+            tracing::warn!(kind = ?err.kind(), "Ignoring .env file: it could not be read")
+        }
+        Err(_) => tracing::warn!("Ignoring .env file: it could not be loaded"),
     }
 
     let config_path =
