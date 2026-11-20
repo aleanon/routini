@@ -8,3 +8,7 @@ compose name="":
 
 log name:
     docker logs routini-{{name}}-1
+
+# Reload the config in the running container without restarting
+reload:
+    docker compose kill -s SIGHUP routini

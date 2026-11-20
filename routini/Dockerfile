@@ -16,4 +16,6 @@ RUN cargo build --release --bin routini
 FROM debian:buster-slim AS runtime
 WORKDIR /app
 COPY --from=builder /app/routini/target/release/routini /usr/local/bin
+# Picked up from the working directory, override with --config or ROUTINI_CONFIG
+COPY --from=builder /app/routini/config.json /app/config.json
 ENTRYPOINT ["/usr/local/bin/routini"]
