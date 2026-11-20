@@ -222,9 +222,10 @@ impl PassiveHealth {
         }
         let now = Instant::now();
         let mut windows = self.windows.lock().unwrap();
-        let window = windows
-            .entry(backend.addr.clone())
-            .or_insert(FailWindow { count: 0, window_start: now });
+        let window = windows.entry(backend.addr.clone()).or_insert(FailWindow {
+            count: 0,
+            window_start: now,
+        });
         if now.duration_since(window.window_start) > self.config.fail_timeout {
             window.count = 0;
             window.window_start = now;
@@ -365,10 +366,9 @@ impl HeaderRules {
 
                 let xff = if self.trusted_proxy {
                     match upstream.headers.get(&X_FORWARDED_FOR) {
-                        Some(existing) => format!(
-                            "{}, {ip_str}",
-                            existing.to_str().unwrap_or_default()
-                        ),
+                        Some(existing) => {
+                            format!("{}, {ip_str}", existing.to_str().unwrap_or_default())
+                        }
                         None => ip_str.clone(),
                     }
                 } else {
@@ -533,7 +533,10 @@ mod tests {
         r.insert_header(X_FORWARDED_FOR, "1.2.3.4").unwrap();
         rules.apply_request(&mut r, Some("203.0.113.5".parse().unwrap()), false);
 
-        assert_eq!(r.headers.get(&X_FORWARDED_FOR).unwrap(), "1.2.3.4, 203.0.113.5");
+        assert_eq!(
+            r.headers.get(&X_FORWARDED_FOR).unwrap(),
+            "1.2.3.4, 203.0.113.5"
+        );
     }
 
     #[test]
@@ -552,7 +555,10 @@ mod tests {
         r.insert_header(http::header::COOKIE, "secret").unwrap();
         rules.apply_request(&mut r, None, false);
 
-        assert_eq!(r.headers.get(http::header::HOST).unwrap(), "upstream.internal");
+        assert_eq!(
+            r.headers.get(http::header::HOST).unwrap(),
+            "upstream.internal"
+        );
         assert_eq!(r.headers.get("x-api").unwrap(), "1");
         assert!(r.headers.get(http::header::COOKIE).is_none());
     }
@@ -569,7 +575,10 @@ mod tests {
         let default_write = peer.options.write_timeout;
         cfg.apply(&mut peer);
 
-        assert_eq!(peer.options.connection_timeout, Some(Duration::from_millis(500)));
+        assert_eq!(
+            peer.options.connection_timeout,
+            Some(Duration::from_millis(500))
+        );
         assert_eq!(peer.options.read_timeout, Some(Duration::from_secs(5)));
         // unset fields are left untouched
         assert_eq!(peer.options.write_timeout, default_write);
@@ -585,7 +594,10 @@ mod tests {
         let ph = PassiveHealth::new(cfg);
         let backend = AdaptiveBackend::build("127.0.0.1:9001", 1).unwrap();
 
-        assert!(!ph.record_failure(&backend), "first failure should not eject");
+        assert!(
+            !ph.record_failure(&backend),
+            "first failure should not eject"
+        );
         assert!(ph.record_failure(&backend), "second failure should eject");
 
         // still ejected immediately after
@@ -608,8 +620,14 @@ mod tests {
         };
 
         assert!(ac.ip_allowed("10.5.5.5".parse().unwrap()), "in allow net");
-        assert!(!ac.ip_allowed("10.1.2.3".parse().unwrap()), "explicitly denied");
-        assert!(!ac.ip_allowed("192.168.0.1".parse().unwrap()), "outside allow net");
+        assert!(
+            !ac.ip_allowed("10.1.2.3".parse().unwrap()),
+            "explicitly denied"
+        );
+        assert!(
+            !ac.ip_allowed("192.168.0.1".parse().unwrap()),
+            "outside allow net"
+        );
 
         assert!(ac.requires_auth());
         assert!(ac.auth_ok(Some("Basic dXNlcjpwYXNz")));
@@ -651,7 +669,8 @@ mod tests {
             ..Default::default()
         };
         let mut resp = ResponseHeader::build(200, None).unwrap();
-        resp.insert_header(http::header::SERVER, "secret-server").unwrap();
+        resp.insert_header(http::header::SERVER, "secret-server")
+            .unwrap();
         rules.apply_response(&mut resp);
 
         assert_eq!(resp.headers.get("x-served-by").unwrap(), "routini");

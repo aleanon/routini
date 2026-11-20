@@ -64,9 +64,10 @@ impl<D: DecisionEngine> AdaptiveLoadBalancer<D> {
         &self,
         exclude: &[pingora::protocols::l4::socket::SocketAddr],
     ) -> Option<AdaptiveBackend> {
-        self.lb.select_with(&[], self.config.max_iterations, |backend, healthy| {
-            healthy && !exclude.iter().any(|addr| addr == &backend.addr)
-        })
+        self.lb
+            .select_with(&[], self.config.max_iterations, |backend, healthy| {
+                healthy && !exclude.iter().any(|addr| addr == &backend.addr)
+            })
     }
 
     /// Manually enable/disable a backend (used by passive health checks to eject/restore).

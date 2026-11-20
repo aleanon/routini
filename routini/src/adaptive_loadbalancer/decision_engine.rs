@@ -75,7 +75,10 @@ impl AdaptiveDecisionEngine {
     ///
     /// Returns `None` when fewer than two backends report connection counts (i.e. the active
     /// strategy is not tracking connections).
-    fn connection_divergence(&self, backends: &Arc<BTreeSet<AdaptiveBackend>>) -> Option<(f32, usize)> {
+    fn connection_divergence(
+        &self,
+        backends: &Arc<BTreeSet<AdaptiveBackend>>,
+    ) -> Option<(f32, usize)> {
         let mut min = usize::MAX;
         let mut max = 0usize;
         let mut tracked = 0usize;

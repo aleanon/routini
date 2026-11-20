@@ -43,7 +43,10 @@ fn main() -> Result<()> {
     let config_path =
         std::env::var(CONFIG_PATH_ENV).unwrap_or_else(|_| DEFAULT_CONFIG_PATH.to_string());
     let config = load_config_from(&config_path)?;
-    tracing::info!("Loaded configuration: {} route(s)", config.proxy.router.len());
+    tracing::info!(
+        "Loaded configuration: {} route(s)",
+        config.proxy.router.len()
+    );
 
     let listener = TcpListener::bind(config.listen_address())?;
 
@@ -56,10 +59,8 @@ fn main() -> Result<()> {
 
     if config.server.has_runtime_tuning() {
         let mut conf = ServerConf::default();
-        conf.upstream_keepalive_pool_size = config
-            .server
-            .upstream_keepalive_pool_size
-            .unwrap_or(200000);
+        conf.upstream_keepalive_pool_size =
+            config.server.upstream_keepalive_pool_size.unwrap_or(200000);
         if let Some(threads) = config.server.worker_threads {
             conf.threads = threads;
         }

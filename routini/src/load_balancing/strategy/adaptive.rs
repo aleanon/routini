@@ -57,17 +57,19 @@ impl<M: Metrics> Strategy<M> for Adaptive {
             Adaptive::RoundRobin => {
                 AdaptiveSelector::RoundRobin(RoundRobin.build_backend_selector(backends))
             }
-            Adaptive::Random => {
-                AdaptiveSelector::Random(Random.build_backend_selector(backends))
-            }
+            Adaptive::Random => AdaptiveSelector::Random(Random.build_backend_selector(backends)),
             Adaptive::FNVHash => {
                 AdaptiveSelector::FNVHash(FNVHash.build_backend_selector(backends))
             }
             Adaptive::Consistent => {
                 AdaptiveSelector::Consistent(Consistent.build_backend_selector(backends))
             }
-            Adaptive::FewestConnections => AdaptiveSelector::FewestConnections(FewestConnections.build_backend_selector(backends)),
-            Adaptive::FastestServer => AdaptiveSelector::FastestServer(FastestServer.build_backend_selector(backends)),
+            Adaptive::FewestConnections => AdaptiveSelector::FewestConnections(
+                FewestConnections.build_backend_selector(backends),
+            ),
+            Adaptive::FastestServer => {
+                AdaptiveSelector::FastestServer(FastestServer.build_backend_selector(backends))
+            }
         }
     }
 }

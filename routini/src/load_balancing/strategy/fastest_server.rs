@@ -111,7 +111,9 @@ mod tests {
     }
 
     fn set_backend_latency(backend: &Backend<LatencyEWMA>, latency_ms: Duration) {
-        backend.metrics.record_latency(latency_ms, DEFAULT_SMOOTHING_FACTOR);
+        backend
+            .metrics
+            .record_latency(latency_ms, DEFAULT_SMOOTHING_FACTOR);
     }
 
     fn get_backend_latency(backend: &Backend<LatencyEWMA>) -> Option<f32> {

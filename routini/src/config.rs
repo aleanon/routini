@@ -80,11 +80,7 @@ pub struct Config {
 impl Config {
     /// Build the routes described by the config.
     pub fn routes(&self) -> Result<Vec<Route>> {
-        self.proxy
-            .router
-            .iter()
-            .map(RouteEntry::to_route)
-            .collect()
+        self.proxy.router.iter().map(RouteEntry::to_route).collect()
     }
 
     /// The plain (non-TLS) listen address, e.g. `0.0.0.0:3500`.
@@ -238,7 +234,11 @@ impl RouteEntry {
             max_connections: self.max_connections,
             action: self.action.as_ref().map(ActionInput::to_action),
             cache: self.cache.as_ref().map(CacheInput::to_cache),
-            access: self.access.as_ref().map(AccessInput::to_access).transpose()?,
+            access: self
+                .access
+                .as_ref()
+                .map(AccessInput::to_access)
+                .transpose()?,
         })
     }
 

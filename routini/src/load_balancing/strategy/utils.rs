@@ -55,7 +55,9 @@ impl<H: SelectionAlgorithm + Send + Sync, M: Metrics> WeightedSelector<H, M> {
     }
 }
 
-impl<H: SelectionAlgorithm + Send + Sync + 'static, M: Metrics> BackendSelection<M> for WeightedSelector<H, M> {
+impl<H: SelectionAlgorithm + Send + Sync + 'static, M: Metrics> BackendSelection<M>
+    for WeightedSelector<H, M>
+{
     type Iter<'a> = WeightedIterator<'a, H, M>;
 
     fn iter<'a>(&'a self, key: &[u8]) -> Self::Iter<'a> {

@@ -13,8 +13,7 @@ use std::{net::IpAddr, sync::Arc, time::Instant};
 
 /// Shared in-memory response cache backend and its LRU eviction manager (nginx `proxy_cache_path`).
 static CACHE_BACKEND: LazyLock<MemCache> = LazyLock::new(MemCache::new);
-static CACHE_EVICTION: LazyLock<LruManager> =
-    LazyLock::new(|| LruManager::new(256 * 1024 * 1024)); // 256 MiB
+static CACHE_EVICTION: LazyLock<LruManager> = LazyLock::new(|| LruManager::new(256 * 1024 * 1024)); // 256 MiB
 /// Only origin `Cache-Control` drives default cacheability; per-route TTL is applied explicitly.
 const CACHE_DEFAULTS: CacheMetaDefaults = CacheMetaDefaults::new(|_| None, 0, 0);
 
@@ -245,11 +244,7 @@ impl Proxy {
         if !self.vhosts.is_empty() {
             if let Some(host) = host {
                 // Match nginx server_name semantics: case-insensitive, ignore the port.
-                let key = host
-                    .split(':')
-                    .next()
-                    .unwrap_or(host)
-                    .to_ascii_lowercase();
+                let key = host.split(':').next().unwrap_or(host).to_ascii_lowercase();
                 if let Some(vhost) = self.vhosts.get(&key) {
                     return Self::resolve_in(&vhost.router, &[], &vhost.cache, path);
                 }
@@ -315,17 +310,15 @@ impl Proxy {
             .map(|m| {
                 let value = m.value;
                 let strip = value.runtime.state.load().config.strip_path_prefix;
-                let stripped_path = strip
-                        .then_some(m)
-                        .and_then(|m| {
-                            m.params.get(DEFAULT_PATH_REMAINDER_IDENTIFIER).map(|p| {
-                                if !p.starts_with('/') {
-                                    format!("/{p}")
-                                } else {
-                                    p.to_string()
-                                }
-                            })
-                        });
+                let stripped_path = strip.then_some(m).and_then(|m| {
+                    m.params.get(DEFAULT_PATH_REMAINDER_IDENTIFIER).map(|p| {
+                        if !p.starts_with('/') {
+                            format!("/{p}")
+                        } else {
+                            p.to_string()
+                        }
+                    })
+                });
 
                 (value, stripped_path)
             })
@@ -407,8 +400,7 @@ impl ProxyHttp for Proxy {
             };
 
             if let Some(location) = location {
-                let mut resp =
-                    ResponseHeader::build(StatusCode::MOVED_PERMANENTLY.as_u16(), None)?;
+                let mut resp = ResponseHeader::build(StatusCode::MOVED_PERMANENTLY.as_u16(), None)?;
                 resp.insert_header(http::header::LOCATION, location)?;
                 resp.insert_header(http::header::CONTENT_LENGTH, "0")?;
                 session.write_response_header(Box::new(resp), true).await?;
@@ -446,7 +438,8 @@ impl ProxyHttp for Proxy {
         let cached = match resolved {
             Ok(cached) => cached,
             Err(_) => {
-                self.write_status(session, StatusCode::NOT_FOUND.as_u16()).await?;
+                self.write_status(session, StatusCode::NOT_FOUND.as_u16())
+                    .await?;
                 return Ok(true);
             }
         };
@@ -458,12 +451,14 @@ impl ProxyHttp for Proxy {
         if let Some(access) = &state.config.access {
             if let Some(ip) = client_ip(session) {
                 if !access.ip_allowed(ip) {
-                    self.write_status(session, StatusCode::FORBIDDEN.as_u16()).await?;
+                    self.write_status(session, StatusCode::FORBIDDEN.as_u16())
+                        .await?;
                     return Ok(true);
                 }
             } else if !access.allow.is_empty() {
                 // An allow-list is set but we cannot determine the client IP: deny.
-                self.write_status(session, StatusCode::FORBIDDEN.as_u16()).await?;
+                self.write_status(session, StatusCode::FORBIDDEN.as_u16())
+                    .await?;
                 return Ok(true);
             }
 
@@ -594,7 +589,9 @@ impl ProxyHttp for Proxy {
 
         session.cache.enable(
             &*CACHE_BACKEND,
-            Some(&*CACHE_EVICTION as &'static (dyn pingora::cache::eviction::EvictionManager + Sync)),
+            Some(
+                &*CACHE_EVICTION as &'static (dyn pingora::cache::eviction::EvictionManager + Sync),
+            ),
             None,
             None,
             None,
@@ -660,17 +657,13 @@ impl ProxyHttp for Proxy {
         // Pick a healthy backend we have not already tried this request. A retry (driven by
         // `fail_to_connect`) re-enters here with the previous backend recorded, so failover lands
         // on a different upstream. Once exhausted the error is non-retryable.
-        let backend = route
-            .runtime
-            .lb
-            .select_excluding(&ctx.tried)
-            .ok_or(Error {
-                context: Some(ImmutStr::Static("No healthy backends available")),
-                cause: None,
-                etype: ErrorType::InternalError,
-                esource: ErrorSource::Internal,
-                retry: RetryType::Decided(false),
-            })?;
+        let backend = route.runtime.lb.select_excluding(&ctx.tried).ok_or(Error {
+            context: Some(ImmutStr::Static("No healthy backends available")),
+            cause: None,
+            etype: ErrorType::InternalError,
+            esource: ErrorSource::Internal,
+            retry: RetryType::Decided(false),
+        })?;
         ctx.tried.push(backend.addr.clone());
 
         if let Some(stripped_path) = &route.stripped_path {
