@@ -1,0 +1,69 @@
+# TOML equivalent of config.json. routini reads either format: pass --config <path>, set
+# ROUTINI_CONFIG, or name the file config.toml / config.json in the working directory.
+# The format follows the extension (.toml / .json); other extensions are detected from the content.
+# Unknown keys are rejected, so typos fail loudly. Validate with: routini --check --config <path>
+
+[server]
+prometheus_address = "0.0.0.0:9000"
+
+[proxy]
+# A port (bound on all interfaces) or "host:port". Env override: SERVER_ADDRESS
+listener = 3500
+
+[[proxy.router]]
+path = "/api/*"
+strip_prefix = true
+
+[proxy.router.load_balancer]
+strategy = "RoundRobin"
+max_iterations = 100
+health_check_interval_secs = 1
+
+# Adaptive tuning, all optional (defaults shown in comments)
+[proxy.router.load_balancer.adaptive_lb_opt]
+# latency_smoothing_factor = 0.5
+# connections_divergence_ratio = 1.2
+# latency_divergence_ratio = 2.0
+# evaluate_strategy_frequency_secs = 5
+# min_nr_of_connections = 1000
+# hysteresis_exit_factor = 0.75
+
+[[proxy.router.load_balancer.upstreams]]
+address = "127.0.0.1:4001"
+weight = 1
+
+[[proxy.router.load_balancer.upstreams]]
+address = "127.0.0.1:4002"
+weight = 1
+
+[[proxy.router.load_balancer.upstreams]]
+address = "127.0.0.1:4003"
+weight = 1
+
+[[proxy.router.load_balancer.upstreams]]
+address = "127.0.0.1:4004"
+weight = 1
+
+[[proxy.router.load_balancer.upstreams]]
+address = "127.0.0.1:4005"
+weight = 1
+
+[[proxy.router.load_balancer.upstreams]]
+address = "127.0.0.1:4006"
+weight = 1
+
+[[proxy.router.load_balancer.upstreams]]
+address = "127.0.0.1:4007"
+weight = 1
+
+[[proxy.router.load_balancer.upstreams]]
+address = "127.0.0.1:4008"
+weight = 1
+
+[[proxy.router.load_balancer.upstreams]]
+address = "127.0.0.1:4009"
+weight = 1
+
+[[proxy.router.load_balancer.upstreams]]
+address = "127.0.0.1:4010"
+weight = 1

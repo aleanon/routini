@@ -2,6 +2,8 @@ use std::time::Duration;
 
 pub const PROMETHEUS_ENDPOINT_NAME: &str = "prometheus";
 pub const PROMETHEUS_ENDPOINT_ADDRESS: &str = "0.0.0.0:9090";
+pub const LISTEN_ADDRESS_ENV_VAR: &str = "SERVER_ADDRESS";
+pub const PROMETHEUS_ADDRESS_ENV_VAR: &str = "PROMETHEUS_ADDRESS";
 
 // Shutdown
 /// Time between receiving SIGTERM/SIGINT and stopping the runtimes. Listeners stop accepting new

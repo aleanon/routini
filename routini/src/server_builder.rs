@@ -164,9 +164,10 @@ impl Route {
             .into_iter()
             .map(|(addr, weight)| {
                 // `build` constructs the default plain-HTTP peer and `AdaptiveStrategyMetrics`.
-                AdaptiveBackend::build(&addr, weight.max(1)).expect("Invalid backend address")
+                AdaptiveBackend::build(&addr, weight.max(1))
+                    .map_err(|err| eyre!("Invalid backend address '{addr}': {err}"))
             })
-            .collect::<BTreeSet<_>>();
+            .collect::<Result<BTreeSet<_>>>()?;
 
         if backends.is_empty() {
             return Err(eyre!("Must provide at least one backend"));

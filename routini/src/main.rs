@@ -4,11 +4,53 @@ use routini::{
     server_builder::proxy_server,
     shutdown,
     utils::{
-        config_loader::{CONFIG_PATH_ENV, DEFAULT_CONFIG_PATH, load_config_from},
+        config_loader::{config_path, load_config_from},
         tracing::{LogConfig, init_tracing_with_config},
     },
 };
-use std::net::TcpListener;
+use std::{net::TcpListener, path::PathBuf};
+
+const USAGE: &str = "\
+Usage: routini [--config <path>] [--check]
+
+Options:
+  -c, --config <path>  Config file, JSON or TOML (default: $ROUTINI_CONFIG, then
+                       ./config.toml or ./config.json)
+      --check          Validate the config file and exit
+  -h, --help           Print this help
+
+Signals:
+  SIGHUP               Reload the config file
+  SIGTERM / SIGINT     Graceful shutdown, a second one forces exit";
+
+#[derive(Default)]
+struct Args {
+    config: Option<PathBuf>,
+    check: bool,
+}
+
+fn parse_args() -> Result<Args> {
+    let mut args = Args::default();
+    let mut iter = std::env::args().skip(1);
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "-c" | "--config" => match iter.next() {
+                Some(path) => args.config = Some(path.into()),
+                None => return Err(eyre!("{arg} requires a path\n\n{USAGE}")),
+            },
+            "--check" => args.check = true,
+            "-h" | "--help" => {
+                println!("{USAGE}");
+                std::process::exit(0);
+            }
+            other => match other.strip_prefix("--config=") {
+                Some(path) => args.config = Some(path.into()),
+                None => return Err(eyre!("Unknown argument '{other}'\n\n{USAGE}")),
+            },
+        }
+    }
+    Ok(args)
+}
 
 #[global_allocator]
 static GLOBAL: jemallocator::Jemalloc = jemallocator::Jemalloc;
@@ -36,13 +78,26 @@ fn main() -> Result<()> {
         Err(_) => tracing::warn!("Ignoring .env file: it could not be loaded"),
     }
 
-    let config_path =
-        std::env::var(CONFIG_PATH_ENV).unwrap_or_else(|_| DEFAULT_CONFIG_PATH.to_string());
-    let config = load_config_from(&config_path)?;
+    let args = parse_args()?;
+    // Absolute, so SIGHUP reloads the same file whatever the working directory is by then
+    let path = config_path(args.config)?;
+    let path = path.canonicalize().unwrap_or(path);
+    let config = load_config_from(&path)?;
+
+    if args.check {
+        println!(
+            "{}: OK ({} route(s))",
+            path.display(),
+            config.proxy.router.len()
+        );
+        return Ok(());
+    }
     tracing::info!(
+        config = %path.display(),
         "Loaded configuration: {} route(s)",
         config.proxy.router.len()
     );
+    let config_path = path.to_string_lossy().into_owned();
 
     let listener = TcpListener::bind(config.listen_address())?;
 
