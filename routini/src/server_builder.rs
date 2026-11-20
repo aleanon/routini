@@ -389,6 +389,14 @@ impl ServerBuilder {
         .expect("Invalid route");
         router.set_access_log(self.access_log);
         router.set_https_redirect(self.https_redirect);
+        if let Some(port) = self
+            .tls
+            .as_ref()
+            .and_then(|tls| tls.address.rsplit_once(':'))
+            .and_then(|(_, port)| port.parse().ok())
+        {
+            router.set_https_port(port);
+        }
         router.set_compression_level(self.compression_level);
         router.set_request_id(self.request_id);
         router.set_error_pages(self.error_pages);

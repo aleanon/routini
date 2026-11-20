@@ -81,6 +81,29 @@ fn redirect_location(template: &str, session: &Session) -> String {
         .replace("$uri", path)
 }
 
+/// `https://` location for a plain-HTTP request to `host` (Host header or URI authority) and
+/// `path_and_query`. The request's port belongs to the plain listener, so it is replaced with
+/// the TLS listener's port (omitted when 443). The host is parsed as an authority, which drops
+/// userinfo and rejects anything that isn't `host[:port]`. `None` if the host is missing or
+/// malformed.
+fn https_location(
+    host: Option<&str>,
+    path_and_query: Option<&str>,
+    https_port: u16,
+) -> Option<String> {
+    let authority: http::uri::Authority = host?.trim().parse().ok()?;
+    let host = authority.host();
+    if host.is_empty() {
+        return None;
+    }
+    let port = match https_port {
+        443 => String::new(),
+        port => format!(":{port}"),
+    };
+    let path = path_and_query.filter(|p| p.starts_with('/')).unwrap_or("/");
+    Some(format!("https://{host}{port}{path}"))
+}
+
 /// Parse the request's `Content-Length`, if present and valid.
 fn content_length(session: &Session) -> Option<usize> {
     session
@@ -154,8 +177,10 @@ pub struct Proxy {
     table: Arc<ArcSwap<RoutingTable>>,
     /// Emit a structured access-log line per request (nginx `access_log on/off`).
     access_log: bool,
-    /// Redirect plain-HTTP requests to `https://` (nginx `return 301 https://...`).
+    /// Redirect plain-HTTP requests to `https://` (nginx `return 308 https://...`).
     https_redirect: bool,
+    /// Port of the TLS listener that redirects point to.
+    https_port: u16,
     /// Downstream response compression level (nginx `gzip`); 0 disables it.
     compression_level: u32,
     /// Generate/propagate an `X-Request-Id` header for request tracing.
@@ -221,6 +246,7 @@ impl Proxy {
             table: Arc::new(ArcSwap::from_pointee(table)),
             access_log: true,
             https_redirect: false,
+            https_port: 443,
             compression_level: 0,
             request_id: false,
             error_pages: Arc::new(HashMap::new()),
@@ -271,6 +297,11 @@ impl Proxy {
     /// Redirect plain-HTTP requests to the `https://` equivalent.
     pub fn set_https_redirect(&mut self, enabled: bool) {
         self.https_redirect = enabled;
+    }
+
+    /// Port of the TLS listener redirects point to. Default: 443.
+    pub fn set_https_port(&mut self, port: u16) {
+        self.https_port = port;
     }
 
     /// Resolve a request's `host` + `path` to its (cached) route.
@@ -425,23 +456,20 @@ impl ProxyHttp for Proxy {
         if self.https_redirect && !client_is_tls(session) {
             let location = {
                 let req = session.req_header();
-                let host = req.uri.host().or_else(|| {
+                let host = req.uri.authority().map(|a| a.as_str()).or_else(|| {
                     req.headers
                         .get(http::header::HOST)
                         .and_then(|h| h.to_str().ok())
                 });
-                host.map(|host| {
-                    let pq = req
-                        .uri
-                        .path_and_query()
-                        .map(|pq| pq.as_str())
-                        .unwrap_or("/");
-                    format!("https://{host}{pq}")
-                })
+                let pq = req.uri.path_and_query().map(|pq| pq.as_str());
+                https_location(host, pq, self.https_port)
             };
 
             if let Some(location) = location {
-                let mut resp = ResponseHeader::build(StatusCode::MOVED_PERMANENTLY.as_u16(), None)?;
+                // 308 rather than 301 so clients repeat POST/PUT bodies instead of switching
+                // to GET
+                let mut resp =
+                    ResponseHeader::build(StatusCode::PERMANENT_REDIRECT.as_u16(), None)?;
                 resp.insert_header(http::header::LOCATION, location)?;
                 resp.insert_header(http::header::CONTENT_LENGTH, "0")?;
                 session.write_response_header(Box::new(resp), true).await?;
@@ -974,6 +1002,51 @@ mod tests {
         RouteValue {
             runtime: Arc::new(RouteRuntime::new(Arc::new(lb), config)),
         }
+    }
+
+    fn location(port: u16, host: Option<&str>, path: Option<&str>) -> Option<String> {
+        https_location(host, path, port)
+    }
+
+    #[test]
+    fn https_location_keeps_host_path_and_query() {
+        assert_eq!(
+            location(443, Some("example.com"), Some("/a/b?x=1&y=2")).as_deref(),
+            Some("https://example.com/a/b?x=1&y=2")
+        );
+        assert_eq!(
+            location(443, Some("example.com"), None).as_deref(),
+            Some("https://example.com/")
+        );
+    }
+
+    #[test]
+    fn https_location_replaces_the_plain_port_with_the_tls_port() {
+        // Keeping the plain port would send the client back to the plain listener (a loop)
+        assert_eq!(
+            location(443, Some("example.com:80"), Some("/")).as_deref(),
+            Some("https://example.com/")
+        );
+        assert_eq!(
+            location(8443, Some("example.com:3500"), Some("/x")).as_deref(),
+            Some("https://example.com:8443/x")
+        );
+        assert_eq!(
+            location(8443, Some("[::1]:3500"), Some("/x")).as_deref(),
+            Some("https://[::1]:8443/x")
+        );
+    }
+
+    #[test]
+    fn https_location_rejects_missing_or_malformed_hosts() {
+        assert_eq!(location(443, None, Some("/")), None);
+        assert_eq!(location(443, Some(""), Some("/")), None);
+        assert_eq!(location(443, Some("evil.com/path"), Some("/")), None);
+        assert_eq!(location(443, Some("a b"), Some("/")), None);
+        assert_eq!(
+            location(443, Some("user@example.com"), Some("/")).as_deref(),
+            Some("https://example.com/")
+        );
     }
 
     #[test]

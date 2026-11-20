@@ -72,9 +72,10 @@ daemonize = "0.5"
 
 [dev-dependencies]
 worker = { path = "../worker" }
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "native-tls-alpn"] }
 fake = "4.4"
 criterion = { version = "0.7", features = ["html_reports"] }
+rcgen = "0.13"
 
 [[bench]]
 name = "load_balancer"

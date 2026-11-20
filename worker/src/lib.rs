@@ -3,7 +3,7 @@ use std::time::Duration;
 use axum::{
     Router,
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{
         Html,
         sse::{Event, KeepAlive, Sse},
@@ -34,6 +34,22 @@ async fn test_page(State(address): State<String>) -> Html<&'static str> {
 async fn health(State(address): State<String>) -> (StatusCode, String) {
     println!("Health check sent from {}", &address);
     (StatusCode::OK, address)
+}
+
+/// Echoes the forwarding headers set by the proxy, for tests.
+async fn forwarded_headers(headers: HeaderMap) -> String {
+    let get = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string()
+    };
+    format!(
+        "proto={};for={}",
+        get("x-forwarded-proto"),
+        get("x-forwarded-for")
+    )
 }
 
 async fn work(State(address): State<String>) -> StatusCode {
@@ -68,6 +84,7 @@ impl Worker {
             .route("/", get(test_page))
             .route("/health", get(health))
             .route("/work", get(work))
+            .route("/headers", get(forwarded_headers))
             .route("/keep-alive", get(keep_alive))
             .with_state(address.clone());
 

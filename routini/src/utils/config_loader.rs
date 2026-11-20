@@ -97,6 +97,14 @@ pub fn load_config_from<P: AsRef<Path>>(path: P) -> Result<Config> {
             path.display()
         )
     })?;
+    // Canonical, so the same file gives the same config however its path was written
+    // (relative at startup, absolute on reload)
+    let config_dir = path
+        .canonicalize()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("."));
+    config.resolve_paths(&config_dir);
     config.apply_env_overrides(|key| std::env::var(key).ok());
     config
         .validate()

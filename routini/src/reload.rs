@@ -12,6 +12,7 @@
 //! | health checks enabled <-> disabled                    | that route is rebuilt (its metrics reset) |
 //! | new / removed route                                   | started / stopped                         |
 //! | `server`, `proxy.listener`, `proxy.tls`               | reported as requiring a restart or upgrade |
+//! | TLS certificate files changed on disk                 | reported as requiring an upgrade (pingora's rustls listener can't swap them) |
 //!
 //! Routes are identified by `(host, regex, path)`. The routing table is rebuilt and swapped as a
 //! whole, so the per-path lookup caches start fresh. A config that fails to parse or validate is
@@ -43,6 +44,7 @@ use crate::{
     proxy::{Proxy, RouteValue, RoutingTable},
     route::{RouteRuntime, SharedLb},
     server_builder::Route,
+    tls,
     utils::{config_loader::load_config_from, constants::DEFAULT_PATH_CACHE_CAPACITY},
 };
 
@@ -163,6 +165,9 @@ struct State {
     routes: Vec<ManagedRoute>,
     /// Last applied config, to diff route settings and detect changes that need a restart.
     applied: Option<Config>,
+    /// Hash of the TLS certificate and key the listener was started with. The listener can't
+    /// swap them, so a reload only reports when they changed on disk.
+    tls_fingerprint: Option<u64>,
     started: bool,
 }
 
@@ -185,12 +190,17 @@ impl RouteManager {
     ) -> Result<(Self, Proxy)> {
         let routes: Vec<ManagedRoute> = routes.into_iter().map(ManagedRoute::new).collect();
         let proxy = Proxy::with_table(build_table(&routes)?);
+        let tls_fingerprint = applied
+            .as_ref()
+            .and_then(|c| c.proxy.tls.as_ref())
+            .and_then(|tls| tls::fingerprint(&tls.cert_path, &tls.key_path));
         let manager = Self {
             proxy: proxy.clone(),
             config_path,
             state: Mutex::new(State {
                 routes,
                 applied,
+                tls_fingerprint,
                 started: false,
             }),
         };
@@ -299,6 +309,19 @@ impl RouteManager {
                 if changed {
                     report.restart_required.push(section.to_string());
                 }
+            }
+        }
+        let same_tls_files = state
+            .applied
+            .as_ref()
+            .is_some_and(|applied| applied.proxy.tls == config.proxy.tls);
+        if let Some(tls) = &config.proxy.tls {
+            if same_tls_files
+                && tls::fingerprint(&tls.cert_path, &tls.key_path) != state.tls_fingerprint
+            {
+                report
+                    .restart_required
+                    .push("proxy.tls certificate files changed on disk".to_string());
             }
         }
         state.applied = Some(config);

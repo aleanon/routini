@@ -24,6 +24,7 @@ use crate::{
         RouteAction, RouteConfig, TimeoutConfig, UpstreamTls,
     },
     server_builder::{Route, ServerBuilder, TlsConfig as BuilderTlsConfig},
+    tls::check_cert_and_key,
     utils::{
         config_loader::ConfigFormat,
         constants::{
@@ -105,6 +106,18 @@ impl Config {
         }
     }
 
+    /// Make relative TLS file paths relative to `config_dir` (the config file's directory), so
+    /// they don't depend on the working directory routini is started from.
+    pub fn resolve_paths(&mut self, config_dir: &std::path::Path) {
+        if let Some(tls) = &mut self.proxy.tls {
+            for path in [&mut tls.cert_path, &mut tls.key_path] {
+                if std::path::Path::new(path.as_str()).is_relative() {
+                    *path = config_dir.join(&*path).to_string_lossy().into_owned();
+                }
+            }
+        }
+    }
+
     /// Override server level settings from the environment, `get_env` is injectable for tests.
     /// `SERVER_ADDRESS` replaces `proxy.listener`, `PROMETHEUS_ADDRESS` the metrics address.
     pub fn apply_env_overrides(&mut self, get_env: impl Fn(&str) -> Option<String>) {
@@ -165,6 +178,12 @@ impl Config {
                 ));
             }
         }
+        if let Some(tls) = &self.proxy.tls {
+            if let Err(err) = check_cert_and_key(&tls.cert_path, &tls.key_path) {
+                errors.push(format!("proxy.tls: {err}"));
+            }
+        }
+
         let upgrade_sock = self.server.upgrade_sock();
         if upgrade_sock.len() > MAX_UNIX_SOCKET_PATH {
             errors.push(format!(
@@ -1126,6 +1145,39 @@ mod tests {
         ));
         let err = config.into_server_builder().err().unwrap().to_string();
         assert!(err.contains("server.prometheus_address"), "{err}");
+    }
+
+    #[test]
+    fn tls_certificate_problems_are_reported_by_validation() {
+        let config = toml(&MINIMAL_TOML.replace(
+            "listener = 3500",
+            "listener = 3500\n[proxy.tls]\nlistener = 3443\ncert_path = \"/nonexistent/c.pem\"\nkey_path = \"/nonexistent/k.pem\"",
+        ));
+        let err = errors_of(&config);
+        assert!(
+            err.contains("proxy.tls: failed to read certificate"),
+            "{err}"
+        );
+
+        let dir = crate::tls::test_certs::temp_dir("config");
+        let (cert, key) = crate::tls::test_certs::write(&dir);
+        let valid = toml(&MINIMAL_TOML.replace(
+            "listener = 3500",
+            &format!("listener = 3500\n[proxy.tls]\nlistener = 3443\ncert_path = \"{cert}\"\nkey_path = \"{key}\""),
+        ));
+        valid.validate().unwrap();
+    }
+
+    #[test]
+    fn relative_tls_paths_resolve_against_the_config_dir() {
+        let mut config = toml(&MINIMAL_TOML.replace(
+            "listener = 3500",
+            "listener = 3500\n[proxy.tls]\nlistener = 3443\ncert_path = \"certs/c.pem\"\nkey_path = \"/abs/k.pem\"",
+        ));
+        config.resolve_paths(std::path::Path::new("/etc/routini"));
+        let tls = config.proxy.tls.unwrap();
+        assert_eq!(tls.cert_path, "/etc/routini/certs/c.pem");
+        assert_eq!(tls.key_path, "/abs/k.pem");
     }
 
     #[test]
