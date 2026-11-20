@@ -1,14 +1,12 @@
 use color_eyre::eyre::{Result, eyre};
-use pingora::server::configuration::ServerConf;
 use routini::{
-    server_builder::proxy_server,
     shutdown,
     utils::{
         config_loader::{config_path, load_config_from},
         tracing::{LogConfig, init_tracing_with_config},
     },
 };
-use std::{net::TcpListener, path::PathBuf};
+use std::path::PathBuf;
 
 const USAGE: &str = "\
 Usage: routini [--config <path>] [--check]
@@ -99,62 +97,11 @@ fn main() -> Result<()> {
     );
     let config_path = path.to_string_lossy().into_owned();
 
-    let listener = TcpListener::bind(config.listen_address())?;
-
-    let routes = config.routes()?;
-    if routes.is_empty() {
-        return Err(eyre!("Configuration must define at least one route"));
-    }
-
-    let mut builder = proxy_server(listener);
-
-    if config.server.has_runtime_tuning() {
-        let mut conf = ServerConf::default();
-        conf.upstream_keepalive_pool_size =
-            config.server.upstream_keepalive_pool_size.unwrap_or(200000);
-        if let Some(threads) = config.server.worker_threads {
-            conf.threads = threads;
-        }
-        conf.grace_period_seconds = config.server.grace_period_seconds;
-        conf.graceful_shutdown_timeout_seconds = config.server.graceful_shutdown_timeout_seconds;
-        builder = builder.server_config(conf);
-    }
-
-    for route in routes {
-        builder = builder.add_route(route);
-    }
-
-    if let Some(prometheus_address) = config.server.prometheus_address.clone() {
-        builder = builder.prometheus_address(prometheus_address);
-    }
-
-    if let Some(access_log) = config.server.access_log {
-        builder = builder.access_log(access_log);
-    }
-
-    if let Some(https_redirect) = config.server.https_redirect {
-        builder = builder.https_redirect(https_redirect);
-    }
-
-    if let Some(level) = config.server.compression_level {
-        builder = builder.compression_level(level);
-    }
-
-    if let Some(request_id) = config.server.request_id {
-        builder = builder.request_id(request_id);
-    }
-
-    if !config.server.error_pages.is_empty() {
-        builder = builder.error_pages(config.server.error_pages.clone());
-    }
-
-    if let Some(tls) = &config.proxy.tls {
-        builder = builder.tls(tls.to_builder_tls());
-    }
-
-    builder = builder.reload_on_sighup(config_path);
-
-    builder.build().run(shutdown::run_args());
+    config
+        .into_server_builder()?
+        .reload_on_sighup(config_path)
+        .build()
+        .run(shutdown::run_args());
 
     tracing::info!("Shutdown complete");
     Ok(())

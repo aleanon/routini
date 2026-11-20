@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, sync::Arc, time::Duration};
+use std::{collections::BTreeSet, sync::Arc};
 
 use arc_swap::ArcSwap;
 
@@ -22,10 +22,14 @@ pub trait DecisionEngine {
     /// Change the strategy the engine falls back to when no adaptive condition holds.
     /// Called when the strategy is overridden manually. No-op by default.
     fn set_default_strategy(&self, _strategy: Self::Strategy) {}
+
+    /// Apply new tuning options, called on config reload. No-op by default.
+    fn reconfigure(&self, _options: &AdaptiveLbOpt) {}
 }
 
-pub struct AdaptiveDecisionEngine {
-    pub evaluate_strategy_frequency: Duration,
+/// Thresholds of [AdaptiveDecisionEngine], swapped as a whole on reconfigure.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EngineThresholds {
     pub connections_divergence_ratio: f32,
     pub latency_divergence_ratio: f32,
     /// The minimum number of connections needed on the backend with most connections to make use
@@ -34,6 +38,21 @@ pub struct AdaptiveDecisionEngine {
     /// Fraction of the enter thresholds used as exit thresholds. Provides hysteresis so the
     /// engine does not oscillate between strategies on every evaluation cycle.
     pub hysteresis_exit_factor: f32,
+}
+
+impl From<&AdaptiveLbOpt> for EngineThresholds {
+    fn from(opt: &AdaptiveLbOpt) -> Self {
+        Self {
+            connections_divergence_ratio: opt.connections_divergence_ratio,
+            latency_divergence_ratio: opt.latency_divergence_ratio,
+            min_nr_of_connections: opt.min_nr_of_connections,
+            hysteresis_exit_factor: opt.hysteresis_exit_factor,
+        }
+    }
+}
+
+pub struct AdaptiveDecisionEngine {
+    thresholds: ArcSwap<EngineThresholds>,
     /// Strategy to return to when backends are balanced. Starts as the configured starting
     /// strategy, replaced by manual overrides.
     default_strategy: ArcSwap<Adaptive>,
@@ -42,13 +61,13 @@ pub struct AdaptiveDecisionEngine {
 impl AdaptiveDecisionEngine {
     pub fn new(opt: &AdaptiveLbOpt) -> Self {
         Self {
-            evaluate_strategy_frequency: opt.evaluate_strategy_frequency,
-            connections_divergence_ratio: opt.connections_divergence_ratio,
-            latency_divergence_ratio: opt.latency_divergence_ratio,
-            min_nr_of_connections: opt.min_nr_of_connections,
-            hysteresis_exit_factor: opt.hysteresis_exit_factor,
+            thresholds: ArcSwap::from_pointee(EngineThresholds::from(opt)),
             default_strategy: ArcSwap::from_pointee(opt.starting_strategy.clone()),
         }
+    }
+
+    pub fn thresholds(&self) -> Arc<EngineThresholds> {
+        self.thresholds.load_full()
     }
 
     /// The strategy used when no adaptive condition holds.
@@ -154,15 +173,16 @@ impl DecisionEngine for AdaptiveDecisionEngine {
             return self.default_strategy();
         }
 
-        let exit = self.hysteresis_exit_factor;
+        let t = self.thresholds.load();
+        let exit = t.hysteresis_exit_factor;
 
         // 1. Connection imbalance takes priority as a guard against overloading a single backend.
         if let Some((ratio, max)) = self.connection_divergence(backends) {
-            if max >= self.min_nr_of_connections {
+            if max >= t.min_nr_of_connections {
                 let threshold = if *current_strategy == Adaptive::FewestConnections {
-                    exit_threshold(self.connections_divergence_ratio, exit)
+                    exit_threshold(t.connections_divergence_ratio, exit)
                 } else {
-                    self.connections_divergence_ratio
+                    t.connections_divergence_ratio
                 };
                 if ratio > threshold {
                     return Adaptive::FewestConnections;
@@ -173,9 +193,9 @@ impl DecisionEngine for AdaptiveDecisionEngine {
         // 2. Latency divergence: route more traffic to the faster backends.
         if let Some(ratio) = self.latency_divergence(backends) {
             let threshold = if *current_strategy == Adaptive::FastestServer {
-                exit_threshold(self.latency_divergence_ratio, exit)
+                exit_threshold(t.latency_divergence_ratio, exit)
             } else {
-                self.latency_divergence_ratio
+                t.latency_divergence_ratio
             };
             if ratio > threshold {
                 return Adaptive::FastestServer;
@@ -188,6 +208,11 @@ impl DecisionEngine for AdaptiveDecisionEngine {
 
     fn set_default_strategy(&self, strategy: Self::Strategy) {
         self.default_strategy.store(Arc::new(strategy));
+    }
+
+    fn reconfigure(&self, options: &AdaptiveLbOpt) {
+        self.thresholds
+            .store(Arc::new(EngineThresholds::from(options)));
     }
 }
 
@@ -331,6 +356,29 @@ mod tests {
             let got = exit_threshold(enter, factor);
             assert!((got - expected).abs() < 1e-6, "{enter} * {factor}: {got}");
         }
+    }
+
+    #[test]
+    fn reconfigure_changes_thresholds() {
+        let engine = AdaptiveDecisionEngine::new(&AdaptiveLbOpt::default());
+        let backends = set([
+            backend_with_connections("127.0.0.1:8080", 50),
+            backend_with_connections("127.0.0.1:8081", 10),
+        ]);
+        // Default min_nr_of_connections (1000) is not reached
+        assert_eq!(
+            engine.evaluate_strategy(&Adaptive::RoundRobin, &backends),
+            Adaptive::RoundRobin
+        );
+        engine.reconfigure(&AdaptiveLbOpt {
+            min_nr_of_connections: 10,
+            ..Default::default()
+        });
+        assert_eq!(engine.thresholds().min_nr_of_connections, 10);
+        assert_eq!(
+            engine.evaluate_strategy(&Adaptive::RoundRobin, &backends),
+            Adaptive::FewestConnections
+        );
     }
 
     #[test]

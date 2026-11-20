@@ -10,6 +10,7 @@ use crate::{
 };
 
 /// The Options to pass inn during construction of the load balancer.
+#[derive(Debug, Clone, PartialEq)]
 pub struct AdaptiveLbOpt {
     pub latency_smoothing_factor: f32,
     pub connections_divergence_ratio: f32,
@@ -40,6 +41,7 @@ impl Default for AdaptiveLbOpt {
 }
 
 /// The stored configuration to be used at runtime.
+#[derive(Debug, Clone, PartialEq)]
 pub struct AdaptiveLbConfig {
     pub latency_smoothing_factor: f32,
     pub connections_divergence_ratio: f32,
@@ -53,6 +55,12 @@ pub struct AdaptiveLbConfig {
 
 impl From<AdaptiveLbOpt> for AdaptiveLbConfig {
     fn from(value: AdaptiveLbOpt) -> Self {
+        Self::from(&value)
+    }
+}
+
+impl From<&AdaptiveLbOpt> for AdaptiveLbConfig {
+    fn from(value: &AdaptiveLbOpt) -> Self {
         Self {
             latency_smoothing_factor: value.latency_smoothing_factor,
             connections_divergence_ratio: value.connections_divergence_ratio,

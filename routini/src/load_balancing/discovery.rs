@@ -40,6 +40,15 @@ pub trait ServiceDiscovery<M: Metrics = NoMetric> {
 
 // TODO: add DNS base discovery
 
+/// Lets a caller keep a handle to the discovery it hands to [super::Backends], e.g. to change a
+/// [Static] set on config reload.
+#[async_trait]
+impl<M: Metrics, T: ServiceDiscovery<M> + Send + Sync + ?Sized> ServiceDiscovery<M> for Arc<T> {
+    async fn discover(&self) -> Result<(BTreeSet<Backend<M>>, HashMap<u64, bool>)> {
+        (**self).discover().await
+    }
+}
+
 /// A static collection of [Backend]s for service discovery.
 #[derive(Default)]
 pub struct Static<M: Metrics = NoMetric> {
@@ -85,7 +94,6 @@ impl<M: Metrics> Static<M> {
     // TODO: use a queue to avoid racing
 
     // TODO: take an impl iter
-    #[allow(dead_code)]
     pub(crate) fn set(&self, backends: BTreeSet<Backend<M>>) {
         self.backends.store(backends.into())
     }

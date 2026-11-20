@@ -1,3 +1,4 @@
+use arc_swap::ArcSwap;
 use bytes::Bytes;
 use http::StatusCode;
 use matchit::Router;
@@ -33,14 +34,15 @@ use crate::{
     utils::constants::{DEFAULT_PATH_CACHE_CAPACITY, DEFAULT_PATH_REMAINDER_IDENTIFIER},
 };
 
+#[derive(Clone)]
 pub struct RouteValue {
     pub runtime: Arc<RouteRuntime>,
 }
 
 /// The pre-computed result of routing a concrete request path, stored in the path cache.
 ///
-/// Both fields are cheap to clone: `runtime` is an `Arc` (the route table is immutable after build,
-/// so the same config + balancer is shared) and `stripped_path` is computed once and reused,
+/// Both fields are cheap to clone: `runtime` is an `Arc` (a [RoutingTable] is immutable, a config
+/// reload swaps in a new table with fresh caches) and `stripped_path` is computed once and reused,
 /// removing the per-request `format!`/`to_string` allocation from the hot path.
 pub struct CachedRoute {
     pub runtime: Arc<RouteRuntime>,
@@ -97,21 +99,59 @@ struct VHost {
     cache: Cache<Box<str>, Arc<CachedRoute>>,
 }
 
-#[derive(Clone)]
-pub struct Proxy {
+/// Everything route lookup needs: routers, regex locations and their path caches. Immutable once
+/// built; a config reload builds a new table and swaps it in whole ([Proxy::replace_routes]), so
+/// cached lookups (including the pre-computed stripped path) never outlive the config they were
+/// computed from.
+pub struct RoutingTable {
     /// Router + path cache for requests that match no configured virtual host (the default server).
-    default_router: Arc<Router<RouteValue>>,
+    default_router: Router<RouteValue>,
     /// Bounded concurrent cache mapping a concrete request path to its resolved route. The first
     /// request to a path does the matchit lookup and stripping; subsequent requests reuse the
-    /// cached `Arc<CachedRoute>` with no allocation. Routes never change after build, so entries
-    /// never need invalidation — eviction only bounds memory.
-    default_cache: Arc<Cache<Box<str>, Arc<CachedRoute>>>,
+    /// cached `Arc<CachedRoute>` with no allocation. Eviction only bounds memory.
+    default_cache: Cache<Box<str>, Arc<CachedRoute>>,
     /// Name-based virtual hosts, keyed by lowercased host. Empty in the common single-host case,
     /// in which routing skips host handling entirely and behaves exactly like path-only routing.
-    vhosts: Arc<std::collections::HashMap<String, VHost>>,
+    vhosts: HashMap<String, VHost>,
     /// Regex location routes for the default server, tried in order when matchit finds no match
     /// (nginx `location ~ <regex>`). These forward the full path (no prefix stripping).
-    default_regex: Arc<Vec<(Regex, RouteValue)>>,
+    default_regex: Vec<(Regex, RouteValue)>,
+}
+
+impl RoutingTable {
+    /// Build a table from default matchit routes, default regex routes, and vhost routers.
+    pub fn new(
+        default_router: Router<RouteValue>,
+        default_regex: Vec<(Regex, RouteValue)>,
+        vhosts: HashMap<String, Router<RouteValue>>,
+        capacity: usize,
+    ) -> Self {
+        let vhosts = vhosts
+            .into_iter()
+            .map(|(host, router)| {
+                (
+                    host,
+                    VHost {
+                        router,
+                        cache: Cache::new(capacity),
+                    },
+                )
+            })
+            .collect();
+        Self {
+            default_router,
+            default_cache: Cache::new(capacity),
+            vhosts,
+            default_regex,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct Proxy {
+    /// Shared by every clone (the proxy service and the route manager), so a reload that swaps
+    /// the table is seen by all of them.
+    table: Arc<ArcSwap<RoutingTable>>,
     /// Emit a structured access-log line per request (nginx `access_log on/off`).
     access_log: bool,
     /// Redirect plain-HTTP requests to `https://` (nginx `return 301 https://...`).
@@ -149,13 +189,13 @@ impl Proxy {
     }
 
     pub fn with_cache_capacity(routes: Router<RouteValue>, capacity: usize) -> Self {
-        Self::with_vhosts(routes, std::collections::HashMap::new(), capacity)
+        Self::with_vhosts(routes, HashMap::new(), capacity)
     }
 
     /// Build a proxy with a default router plus name-based virtual host routers.
     pub fn with_vhosts(
         default_router: Router<RouteValue>,
-        vhosts: std::collections::HashMap<String, Router<RouteValue>>,
+        vhosts: HashMap<String, Router<RouteValue>>,
         capacity: usize,
     ) -> Self {
         Self::with_regex_routes(default_router, Vec::new(), vhosts, capacity)
@@ -165,33 +205,31 @@ impl Proxy {
     pub fn with_regex_routes(
         default_router: Router<RouteValue>,
         default_regex: Vec<(Regex, RouteValue)>,
-        vhosts: std::collections::HashMap<String, Router<RouteValue>>,
+        vhosts: HashMap<String, Router<RouteValue>>,
         capacity: usize,
     ) -> Self {
-        let vhosts = vhosts
-            .into_iter()
-            .map(|(host, router)| {
-                (
-                    host,
-                    VHost {
-                        router,
-                        cache: Cache::new(capacity),
-                    },
-                )
-            })
-            .collect();
+        Self::with_table(RoutingTable::new(
+            default_router,
+            default_regex,
+            vhosts,
+            capacity,
+        ))
+    }
 
+    pub fn with_table(table: RoutingTable) -> Self {
         Proxy {
-            default_router: Arc::new(default_router),
-            default_cache: Arc::new(Cache::new(capacity)),
-            vhosts: Arc::new(vhosts),
-            default_regex: Arc::new(default_regex),
+            table: Arc::new(ArcSwap::from_pointee(table)),
             access_log: true,
             https_redirect: false,
             compression_level: 0,
             request_id: false,
             error_pages: Arc::new(HashMap::new()),
         }
+    }
+
+    /// Atomically swap the routing table. Requests already routed keep their resolved route.
+    pub fn replace_routes(&self, table: RoutingTable) {
+        self.table.store(Arc::new(table));
     }
 
     /// Set custom error-page bodies keyed by status code.
@@ -241,19 +279,20 @@ impl Proxy {
     /// used; otherwise the default server handles it. In the common (no-vhost) case this is a
     /// single concurrent-map lookup plus an `Arc` clone, identical to path-only routing.
     pub fn resolve(&self, host: Option<&str>, path: &str) -> Result<Arc<CachedRoute>> {
-        if !self.vhosts.is_empty() {
+        let table = self.table.load();
+        if !table.vhosts.is_empty() {
             if let Some(host) = host {
                 // Match nginx server_name semantics: case-insensitive, ignore the port.
                 let key = host.split(':').next().unwrap_or(host).to_ascii_lowercase();
-                if let Some(vhost) = self.vhosts.get(&key) {
+                if let Some(vhost) = table.vhosts.get(&key) {
                     return Self::resolve_in(&vhost.router, &[], &vhost.cache, path);
                 }
             }
         }
         Self::resolve_in(
-            &self.default_router,
-            &self.default_regex,
-            &self.default_cache,
+            &table.default_router,
+            &table.default_regex,
+            &table.default_cache,
             path,
         )
     }
@@ -288,8 +327,10 @@ impl Proxy {
     }
 
     /// Look up a path in the default router (used by tests).
-    pub fn route(&self, path: &str) -> Result<(&RouteValue, Option<String>)> {
-        Self::route_in(&self.default_router, path)
+    pub fn route(&self, path: &str) -> Result<(RouteValue, Option<String>)> {
+        let table = self.table.load();
+        Self::route_in(&table.default_router, path)
+            .map(|(value, stripped)| (value.clone(), stripped))
     }
 
     fn route_in<'r>(
@@ -758,7 +799,7 @@ impl ProxyHttp for Proxy {
                 let latency = start.elapsed();
                 backend
                     .metrics
-                    .record_latency(latency, route.runtime.lb.config.latency_smoothing_factor);
+                    .record_latency(latency, route.runtime.lb.config().latency_smoothing_factor);
             }
         }
         Ok(())

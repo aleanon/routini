@@ -1,13 +1,13 @@
 use std::{
     collections::{BTreeSet, HashMap},
     net::TcpListener,
+    path::PathBuf,
     sync::{Arc, LazyLock},
     thread,
     time::Duration,
 };
 
 use color_eyre::eyre::{Result, eyre};
-use matchit::Router;
 use pingora::{
     listeners::tls::TlsSettings,
     prelude::background_service,
@@ -18,17 +18,17 @@ use pingora::{
 use regex::Regex;
 
 use crate::{
-    adaptive_loadbalancer::{
-        AdaptiveBackend, AdaptiveBackends, AdaptiveLoadBalancer,
-        decision_engine::AdaptiveDecisionEngine, options::AdaptiveLbOpt,
+    adaptive_loadbalancer::{AdaptiveBackend, AdaptiveBackends, options::AdaptiveLbOpt},
+    config::Config,
+    load_balancing::{
+        Backends,
+        discovery::Static,
+        strategy::{Adaptive, adaptive::AdaptiveStrategyMetrics},
     },
-    load_balancing::{Backends, discovery::Static, strategy::Adaptive},
-    proxy::{Proxy, RouteValue},
-    reload::{RouteRegistry, spawn_reload_watcher},
-    route::RouteRuntime,
+    reload::RouteManager,
     utils::constants::{
-        DEFAULT_GRACE_PERIOD, DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT, DEFAULT_PATH_CACHE_CAPACITY,
-        DEFAULT_WILDCARD_IDENTIFIER, PROMETHEUS_ENDPOINT_ADDRESS,
+        DEFAULT_GRACE_PERIOD, DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT, DEFAULT_WILDCARD_IDENTIFIER,
+        PROMETHEUS_ENDPOINT_ADDRESS,
     },
 };
 
@@ -67,6 +67,7 @@ pub fn proxy_server(listener: TcpListener) -> ServerBuilder {
         https_redirect: false,
         compression_level: 0,
         reload_config_path: None,
+        applied_config: None,
         request_id: false,
         error_pages: HashMap::new(),
     }
@@ -84,6 +85,9 @@ pub struct Route {
     /// When true, `path` is a regex location matched against the full request path (default server
     /// only), tried after matchit routes (nginx `location ~ <regex>`).
     pub is_regex: bool,
+    /// Handle to the static discovery inside [Self::backends], used to change the backend set of
+    /// a running route on config reload.
+    pub(crate) discovery: Arc<Static<AdaptiveStrategyMetrics>>,
 }
 
 impl Route {
@@ -125,11 +129,12 @@ impl Route {
             ));
         }
         let path = path.as_ref().replacen("*", DEFAULT_WILDCARD_IDENTIFIER, 1);
-        let backends = Self::build_backend_set(backends)?;
+        let discovery = Self::build_discovery(backends)?;
 
         Ok(Route {
             path,
-            backends: Backends::new(Static::new(backends)),
+            backends: Backends::new(Box::new(discovery.clone())),
+            discovery,
             lb_options,
             route_config: RouteConfig::default(),
             host: None,
@@ -145,16 +150,23 @@ impl Route {
         lb_options: AdaptiveLbOpt,
     ) -> Result<Self> {
         Regex::new(pattern.as_ref()).map_err(|e| eyre!("Invalid regex pattern: {e}"))?;
-        let backends = Self::build_backend_set(backends)?;
+        let discovery = Self::build_discovery(backends)?;
 
         Ok(Route {
             path: pattern.as_ref().to_string(),
-            backends: Backends::new(Static::new(backends)),
+            backends: Backends::new(Box::new(discovery.clone())),
+            discovery,
             lb_options,
             route_config: RouteConfig::default(),
             host: None,
             is_regex: true,
         })
+    }
+
+    fn build_discovery(
+        backends: impl IntoIterator<Item = (String, usize)>,
+    ) -> Result<Arc<Static<AdaptiveStrategyMetrics>>> {
+        Ok(Arc::from(Static::new(Self::build_backend_set(backends)?)))
     }
 
     fn build_backend_set(
@@ -216,6 +228,7 @@ pub struct ServerBuilder {
     https_redirect: bool,
     compression_level: u32,
     reload_config_path: Option<String>,
+    applied_config: Option<Config>,
     request_id: bool,
     error_pages: HashMap<u16, String>,
 }
@@ -261,10 +274,17 @@ impl ServerBuilder {
         self
     }
 
-    /// Reload per-route config from `path` on `SIGHUP` (nginx `-s reload`). Structural changes
-    /// still require a restart.
+    /// Re-read and apply the config file at `path` on `SIGHUP` (nginx `-s reload`), see
+    /// [crate::reload] for what changes apply live. Without it SIGHUP only logs an error.
     pub fn reload_on_sighup(mut self, path: String) -> Self {
         self.reload_config_path = Some(path);
+        self
+    }
+
+    /// The config the routes were built from, so reloads can tell which route settings changed
+    /// and which changes need a restart. Without it every reloaded route counts as changed.
+    pub fn applied_config(mut self, config: Config) -> Self {
+        self.applied_config = Some(config);
         self
     }
 
@@ -281,6 +301,12 @@ impl ServerBuilder {
     }
 
     pub fn build(self) -> Server {
+        self.build_with_reload_handle().0
+    }
+
+    /// Like [Self::build], also returning the [RouteManager] that owns the routes, for applying
+    /// config reloads programmatically ([RouteManager::reload]).
+    pub fn build_with_reload_handle(self) -> (Server, Arc<RouteManager>) {
         assert!(!self.routes.is_empty(), "requires at least one route");
         // Use a caller-provided ServerConf as-is (it carries the configured tuning); otherwise fall
         // back to defaults with an aggressive upstream keepalive pool.
@@ -299,80 +325,29 @@ impl ServerBuilder {
             .get_or_insert(DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT.as_secs());
         let mut server = Server::new_with_opt_and_conf(None, server_config);
 
-        let mut default_router = Router::new();
-        let mut default_regex: Vec<(Regex, RouteValue)> = Vec::new();
-        let mut vhost_routers: HashMap<String, Router<RouteValue>> = HashMap::new();
-        let mut registry: RouteRegistry = HashMap::new();
-        for route in self.routes {
-            let lb_options = route.lb_options;
-
-            let decision_engine = AdaptiveDecisionEngine::new(&lb_options);
-            let lb = AdaptiveLoadBalancer::from_backends(
-                route.backends,
-                Some(lb_options),
-                decision_engine,
-            );
-
-            let service_name = format!("adaptive-lb-{}", &route.path);
-            let mut background_service = background_service(&service_name, lb);
-            background_service.threads = Some(1);
-            let task = background_service.task();
-            server.add_service(background_service);
-
-            let route_value = RouteValue {
-                runtime: Arc::new(RouteRuntime::new(task, route.route_config)),
-            };
-
-            // Register the runtime so SIGHUP reload can target it (key mirrors RouteEntry::route_key).
-            let host_key = route
-                .host
-                .as_deref()
-                .map(|h| h.to_ascii_lowercase())
-                .unwrap_or_default();
-            registry.insert(
-                (host_key, route.is_regex, route.path.clone()),
-                route_value.runtime.clone(),
-            );
-
-            if route.is_regex {
-                tracing::info!("Adding regex route: {}", route.path);
-                let re = Regex::new(&route.path).expect("regex validated at construction");
-                default_regex.push((re, route_value));
-                continue;
-            }
-
-            match route.host {
-                Some(host) => {
-                    tracing::info!("Adding route: {} (host: {host})", route.path);
-                    vhost_routers
-                        .entry(host.to_ascii_lowercase())
-                        .or_insert_with(Router::new)
-                        .insert(route.path, route_value)
-                        .expect("Invalid route");
-                }
-                None => {
-                    tracing::info!("Adding route: {}", route.path);
-                    default_router
-                        .insert(route.path, route_value)
-                        .expect("Invalid route");
-                }
+        for route in &self.routes {
+            match &route.host {
+                Some(host) => tracing::info!("Adding route: {} (host: {host})", route.path),
+                None if route.is_regex => tracing::info!("Adding regex route: {}", route.path),
+                None => tracing::info!("Adding route: {}", route.path),
             }
         }
-        let mut router = Proxy::with_regex_routes(
-            default_router,
-            default_regex,
-            vhost_routers,
-            DEFAULT_PATH_CACHE_CAPACITY,
-        );
+        let (manager, mut router) = RouteManager::new(
+            self.routes,
+            self.reload_config_path.map(PathBuf::from),
+            self.applied_config,
+        )
+        .expect("Invalid route");
         router.set_access_log(self.access_log);
         router.set_https_redirect(self.https_redirect);
         router.set_compression_level(self.compression_level);
         router.set_request_id(self.request_id);
         router.set_error_pages(self.error_pages);
 
-        if let Some(path) = self.reload_config_path {
-            spawn_reload_watcher(path, Arc::new(registry));
-        }
+        let mut manager_service = background_service("route-manager", manager);
+        manager_service.threads = Some(2);
+        let manager = manager_service.task();
+        server.add_service(manager_service);
 
         let mut router_service = http_proxy_service(&server.configuration, router);
         let available_parallelism = thread::available_parallelism().map(Into::into).unwrap_or(1);
@@ -400,7 +375,7 @@ impl ServerBuilder {
         server.add_service(prometheus);
 
         server.bootstrap();
-        server
+        (server, manager)
     }
 }
 

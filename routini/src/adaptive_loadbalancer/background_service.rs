@@ -40,7 +40,7 @@ impl BackgroundService for AdaptiveLoadBalancer<AdaptiveDecisionEngine> {
                     .backends()
                     .run_health_check(self.lb.parallel_health_check)
                     .await;
-                next_health_check = now + self.lb.health_check_frequency.unwrap_or(NEVER);
+                next_health_check = now + self.config().health_check_interval.unwrap_or(NEVER);
             }
 
             if next_strategy_eval <= now {
@@ -51,7 +51,7 @@ impl BackgroundService for AdaptiveLoadBalancer<AdaptiveDecisionEngine> {
                     .evaluate_strategy(&current_strategy, &backends);
 
                 let was_updated = self.lb.update_strategy(strategy).await;
-                next_strategy_eval = now + self.decision_engine.evaluate_strategy_frequency;
+                next_strategy_eval = now + self.config().evaluate_strategy_frequency;
                 if was_updated {
                     selector_rebuild = now + self.lb.rebuild_frequency().await.unwrap_or(NEVER);
                 }
@@ -77,6 +77,12 @@ impl BackgroundService for AdaptiveLoadBalancer<AdaptiveDecisionEngine> {
             // Wake on whichever comes first, so a shutdown is not delayed by a long sleep
             tokio::select! {
                 _ = tokio::time::sleep_until(to_wake.into()) => {}
+                // Config reloaded: run health check and evaluation now, rescheduling them with
+                // the new intervals
+                _ = self.wait_reconfigured() => {
+                    next_health_check = Instant::now();
+                    next_strategy_eval = Instant::now();
+                }
                 changed = shutdown.changed() => {
                     // Err means the sender is gone, which only happens when the server is
                     // being torn down, treat it as a shutdown as well.

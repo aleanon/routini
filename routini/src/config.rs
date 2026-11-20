@@ -7,7 +7,9 @@
 use std::{collections::HashMap, net::IpAddr, time::Duration};
 
 use base64::prelude::{BASE64_STANDARD, Engine};
-use std::net::SocketAddr;
+use std::net::{SocketAddr, TcpListener};
+
+use pingora::server::configuration::ServerConf;
 
 use color_eyre::eyre::{Result, WrapErr, eyre};
 use http::{HeaderName, HeaderValue};
@@ -21,7 +23,7 @@ use crate::{
         AccessControl, CacheConfig, HeaderRules, HostRewrite, PassiveHealthConfig, RetryConfig,
         RouteAction, RouteConfig, TimeoutConfig, UpstreamTls,
     },
-    server_builder::{Route, TlsConfig as BuilderTlsConfig},
+    server_builder::{Route, ServerBuilder, TlsConfig as BuilderTlsConfig, proxy_server},
     utils::{
         config_loader::ConfigFormat,
         constants::{
@@ -193,6 +195,55 @@ impl Config {
             errors.len(),
             errors.join("\n  - ")
         ))
+    }
+
+    /// Turn the config into a [ServerBuilder] with every server and route setting applied. Call
+    /// [Self::validate] first ([crate::utils::config_loader::load_config_from] does). The config is
+    /// kept as the builder's applied config, so reloads can diff against it.
+    pub fn into_server_builder(self) -> Result<ServerBuilder> {
+        // Binding up front gives a clear error if the port is taken. The listener is dropped
+        // again, pingora binds the address itself when the service starts.
+        let listener = TcpListener::bind(self.listen_address())
+            .wrap_err_with(|| format!("Failed to bind to {}", self.listen_address()))?;
+        let mut builder = proxy_server(listener);
+
+        let server = &self.server;
+        if server.has_runtime_tuning() {
+            let mut conf = ServerConf::default();
+            conf.upstream_keepalive_pool_size =
+                server.upstream_keepalive_pool_size.unwrap_or(200000);
+            if let Some(threads) = server.worker_threads {
+                conf.threads = threads;
+            }
+            conf.grace_period_seconds = server.grace_period_seconds;
+            conf.graceful_shutdown_timeout_seconds = server.graceful_shutdown_timeout_seconds;
+            builder = builder.server_config(conf);
+        }
+        for route in self.routes()? {
+            builder = builder.add_route(route);
+        }
+        if let Some(address) = server.prometheus_address.clone() {
+            builder = builder.prometheus_address(address);
+        }
+        if let Some(access_log) = server.access_log {
+            builder = builder.access_log(access_log);
+        }
+        if let Some(https_redirect) = server.https_redirect {
+            builder = builder.https_redirect(https_redirect);
+        }
+        if let Some(level) = server.compression_level {
+            builder = builder.compression_level(level);
+        }
+        if let Some(request_id) = server.request_id {
+            builder = builder.request_id(request_id);
+        }
+        if !server.error_pages.is_empty() {
+            builder = builder.error_pages(server.error_pages.clone());
+        }
+        if let Some(tls) = &self.proxy.tls {
+            builder = builder.tls(tls.to_builder_tls());
+        }
+        Ok(builder.applied_config(self))
     }
 
     /// Build the routes described by the config.

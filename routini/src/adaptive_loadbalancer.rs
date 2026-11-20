@@ -4,6 +4,9 @@ pub mod options;
 
 use std::{collections::BTreeSet, sync::Arc};
 
+use arc_swap::{ArcSwap, Guard};
+use tokio::sync::Notify;
+
 use crate::{
     adaptive_loadbalancer::{
         decision_engine::DecisionEngine,
@@ -24,7 +27,13 @@ pub type AdaptiveBackends = Backends<AdaptiveStrategyMetrics>;
 pub struct AdaptiveLoadBalancer<D> {
     lb: LoadBalancer<Adaptive, AdaptiveStrategyMetrics>,
     decision_engine: D,
-    pub config: AdaptiveLbConfig,
+    /// Swapped as a whole by [Self::reconfigure], read on every request.
+    config: ArcSwap<AdaptiveLbConfig>,
+    /// Whether a health check was installed at construction. Health checks can't be added or
+    /// removed afterwards, a reload that toggles them rebuilds the load balancer.
+    health_check_enabled: bool,
+    /// Wakes the background service after [Self::reconfigure] so new intervals apply at once.
+    reconfigured: Notify,
 }
 
 impl<D: DecisionEngine> AdaptiveLoadBalancer<D> {
@@ -37,7 +46,8 @@ impl<D: DecisionEngine> AdaptiveLoadBalancer<D> {
         let mut lb =
             LoadBalancer::from_backends_with_strategy(backends, options.starting_strategy.clone());
 
-        if options.health_check_interval.is_some() {
+        let health_check_enabled = options.health_check_interval.is_some();
+        if health_check_enabled {
             let hc = TcpHealthCheck::new();
             lb.set_health_check(hc);
             lb.health_check_frequency = options.health_check_interval.clone()
@@ -46,8 +56,38 @@ impl<D: DecisionEngine> AdaptiveLoadBalancer<D> {
         Self {
             lb,
             decision_engine,
-            config: AdaptiveLbConfig::from(options),
+            config: ArcSwap::from_pointee(AdaptiveLbConfig::from(options)),
+            health_check_enabled,
+            reconfigured: Notify::new(),
         }
+    }
+
+    /// The current runtime configuration.
+    pub fn config(&self) -> Guard<Arc<AdaptiveLbConfig>> {
+        self.config.load()
+    }
+
+    pub fn health_check_enabled(&self) -> bool {
+        self.health_check_enabled
+    }
+
+    /// Apply new tuning (thresholds, intervals, max iterations, smoothing factor) without
+    /// touching backends, metrics or the current strategy. Toggling health checks on or off is
+    /// not possible here, see [Self::health_check_enabled].
+    pub fn reconfigure(&self, options: &AdaptiveLbOpt) {
+        self.decision_engine.reconfigure(options);
+        self.config.store(Arc::new(AdaptiveLbConfig::from(options)));
+        self.reconfigured.notify_one();
+    }
+
+    /// Re-run service discovery now and rebuild the selector if the backends changed.
+    /// Backends that are kept retain their metrics and health.
+    pub async fn refresh(&self) -> pingora::Result<()> {
+        self.lb.update().await
+    }
+
+    pub(crate) async fn wait_reconfigured(&self) {
+        self.reconfigured.notified().await
     }
 
     pub fn backends(&self) -> Arc<BTreeSet<AdaptiveBackend>> {
@@ -55,7 +95,7 @@ impl<D: DecisionEngine> AdaptiveLoadBalancer<D> {
     }
 
     pub fn select(&self, key: &[u8]) -> Option<AdaptiveBackend> {
-        self.lb.select(key, self.config.max_iterations)
+        self.lb.select(key, self.config.load().max_iterations)
     }
 
     /// Select a healthy backend whose address is not in `exclude`. Used for per-request failover
@@ -64,10 +104,11 @@ impl<D: DecisionEngine> AdaptiveLoadBalancer<D> {
         &self,
         exclude: &[pingora::protocols::l4::socket::SocketAddr],
     ) -> Option<AdaptiveBackend> {
-        self.lb
-            .select_with(&[], self.config.max_iterations, |backend, healthy| {
-                healthy && !exclude.iter().any(|addr| addr == &backend.addr)
-            })
+        self.lb.select_with(
+            &[],
+            self.config.load().max_iterations,
+            |backend, healthy| healthy && !exclude.iter().any(|addr| addr == &backend.addr),
+        )
     }
 
     /// Manually enable/disable a backend (used by passive health checks to eject/restore).
