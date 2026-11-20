@@ -25,15 +25,33 @@ pub struct LogConfig {
 
 impl Default for LogConfig {
     fn default() -> Self {
+        Self::from_env()
+    }
+}
+
+impl LogConfig {
+    /// Read the logging configuration from the environment:
+    /// `RUST_LOG`, `LOG_DIR`, `LOG_JSON`, `NO_COLOR` and `LOG_MAX_AGE_DAYS`.
+    pub fn from_env() -> Self {
+        Self::from_env_with(|key| std::env::var(key).ok())
+    }
+
+    /// [Self::from_env] with an injectable lookup, for testing. Empty values count as unset, so
+    /// `LOG_DIR=` in a `.env` file keeps logging on stdout.
+    pub fn from_env_with(get_env: impl Fn(&str) -> Option<String>) -> Self {
+        let get = |key: &str| get_env(key).filter(|v| !v.trim().is_empty());
         Self {
-            filter: std::env::var("RUST_LOG")
-                .unwrap_or_else(|_| DEFAULT_LOG_LEVEL_FILTER.to_string()),
-            log_dir: None,
+            filter: get("RUST_LOG").unwrap_or_else(|| DEFAULT_LOG_LEVEL_FILTER.to_string()),
+            log_dir: get("LOG_DIR"),
             file_prefix: "routini".to_string(),
-            json_format: DEFAULT_LOG_JSON,
-            ansi: true,
-            max_log_age_days: std::env::var("LOG_MAX_AGE_DAYS")
-                .ok()
+            json_format: get("LOG_JSON")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(DEFAULT_LOG_JSON),
+            // NO_COLOR disables colors when present with any non-empty value (no-color.org)
+            ansi: get("NO_COLOR").is_none(),
+            // MAX_LOG_AGE_DAYS is the name main.rs used to read, kept as an alias
+            max_log_age_days: get("LOG_MAX_AGE_DAYS")
+                .or_else(|| get("MAX_LOG_AGE_DAYS"))
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(DEFAULT_MAX_LOG_AGE_DAYS),
         }
@@ -225,4 +243,56 @@ pub fn init_tracing_with_config(config: LogConfig) -> Result<(), Box<dyn std::er
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod env_tests {
+    use super::*;
+
+    fn config(vars: &[(&str, &str)]) -> LogConfig {
+        LogConfig::from_env_with(|key| {
+            vars.iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| v.to_string())
+        })
+    }
+
+    #[test]
+    fn defaults_when_unset() {
+        let c = config(&[]);
+        assert_eq!(c.filter, DEFAULT_LOG_LEVEL_FILTER);
+        assert_eq!(c.log_dir, None);
+        assert_eq!(c.json_format, DEFAULT_LOG_JSON);
+        assert!(c.ansi);
+        assert_eq!(c.max_log_age_days, DEFAULT_MAX_LOG_AGE_DAYS);
+    }
+
+    #[test]
+    fn empty_values_count_as_unset() {
+        let c = config(&[("LOG_DIR", ""), ("RUST_LOG", " "), ("NO_COLOR", "")]);
+        assert_eq!(c.log_dir, None);
+        assert_eq!(c.filter, DEFAULT_LOG_LEVEL_FILTER);
+        assert!(c.ansi);
+    }
+
+    #[test]
+    fn values_are_read() {
+        let c = config(&[
+            ("LOG_DIR", "/var/log/routini"),
+            ("LOG_JSON", "TRUE"),
+            ("NO_COLOR", "1"),
+            ("LOG_MAX_AGE_DAYS", "3"),
+        ]);
+        assert_eq!(c.log_dir.as_deref(), Some("/var/log/routini"));
+        assert!(c.json_format);
+        assert!(!c.ansi);
+        assert_eq!(c.max_log_age_days, 3);
+    }
+
+    #[test]
+    fn max_age_alias_is_accepted_but_canonical_name_wins() {
+        assert_eq!(config(&[("MAX_LOG_AGE_DAYS", "9")]).max_log_age_days, 9);
+        let both = config(&[("MAX_LOG_AGE_DAYS", "9"), ("LOG_MAX_AGE_DAYS", "2")]);
+        assert_eq!(both.max_log_age_days, 2);
+    }
 }

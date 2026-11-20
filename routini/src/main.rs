@@ -5,7 +5,6 @@ use routini::{
     shutdown,
     utils::{
         config_loader::{CONFIG_PATH_ENV, DEFAULT_CONFIG_PATH, load_config_from},
-        constants::{DEFAULT_LOG_JSON, DEFAULT_LOG_LEVEL_FILTER, DEFAULT_MAX_LOG_AGE_DAYS},
         tracing::{LogConfig, init_tracing_with_config},
     },
 };
@@ -15,28 +14,18 @@ use std::net::TcpListener;
 static GLOBAL: jemallocator::Jemalloc = jemallocator::Jemalloc;
 
 fn main() -> Result<()> {
-    // Configure logging based on environment
-    let log_config = LogConfig {
-        filter: std::env::var("RUST_LOG").unwrap_or_else(|_| DEFAULT_LOG_LEVEL_FILTER.to_string()),
+    // Load .env before anything reads the environment. Variables already set in the real
+    // environment take precedence, the file only fills in what is missing.
+    let dotenv = dotenvy::dotenv();
 
-        log_dir: std::env::var("LOG_DIR").ok(),
-
-        file_prefix: "routini".to_string(),
-
-        json_format: std::env::var("LOG_JSON")
-            .map(|v| v == "1" || v.to_lowercase() == "true")
-            .unwrap_or(DEFAULT_LOG_JSON),
-
-        ansi: std::env::var("NO_COLOR").is_err(),
-
-        max_log_age_days: std::env::var("MAX_LOG_AGE_DAYS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(DEFAULT_MAX_LOG_AGE_DAYS),
-    };
-
-    init_tracing_with_config(log_config).expect("Failed to set up tracing");
+    init_tracing_with_config(LogConfig::from_env()).expect("Failed to set up tracing");
     color_eyre::install().expect("Failed to install color_eyre");
+
+    match dotenv {
+        Ok(path) => tracing::info!(path = %path.display(), "Loaded environment file"),
+        Err(err) if err.not_found() => {}
+        Err(err) => tracing::warn!("Failed to load .env file: {err}"),
+    }
 
     let config_path =
         std::env::var(CONFIG_PATH_ENV).unwrap_or_else(|_| DEFAULT_CONFIG_PATH.to_string());
