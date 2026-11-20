@@ -5,6 +5,13 @@ pub const PROMETHEUS_ENDPOINT_ADDRESS: &str = "0.0.0.0:9090";
 pub const LISTEN_ADDRESS_ENV_VAR: &str = "SERVER_ADDRESS";
 pub const PROMETHEUS_ADDRESS_ENV_VAR: &str = "PROMETHEUS_ADDRESS";
 
+// Process management (daemon mode / graceful upgrade)
+/// Used when $XDG_RUNTIME_DIR is unset, matches `RuntimeDirectory=routini` in the systemd unit.
+/// Never a shared directory like /tmp, see [crate::utils::runtime_paths].
+pub const DEFAULT_RUNTIME_DIR: &str = "/run/routini";
+pub const PID_FILE_NAME: &str = "routini.pid";
+pub const UPGRADE_SOCK_NAME: &str = "routini_upgrade.sock";
+
 // Shutdown
 /// Time between receiving SIGTERM/SIGINT and stopping the runtimes. Listeners stop accepting new
 /// connections immediately, in-flight requests get this long to finish. Pingora's own default is

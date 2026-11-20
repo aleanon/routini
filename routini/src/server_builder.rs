@@ -12,7 +12,10 @@ use pingora::{
     listeners::tls::TlsSettings,
     prelude::background_service,
     proxy::http_proxy_service,
-    server::{Server, configuration::ServerConf},
+    server::{
+        Server,
+        configuration::{Opt, ServerConf},
+    },
     services::listening::Service,
 };
 use regex::Regex;
@@ -56,20 +59,30 @@ pub fn proxy_server(listener: TcpListener) -> ServerBuilder {
         .local_addr()
         .expect("Invalid socket address")
         .to_string();
+    ServerBuilder::new(address)
+}
 
-    ServerBuilder {
-        address,
-        routes: Vec::new(),
-        server_config: None,
-        tls: None,
-        prometheus_address: None,
-        access_log: true,
-        https_redirect: false,
-        compression_level: 0,
-        reload_config_path: None,
-        applied_config: None,
-        request_id: false,
-        error_pages: HashMap::new(),
+impl ServerBuilder {
+    /// A builder listening on `address`. Unlike [proxy_server] this does not bind first, which
+    /// a graceful upgrade needs as the old process still holds the port.
+    pub fn new(address: impl Into<String>) -> Self {
+        ServerBuilder {
+            address: address.into(),
+            routes: Vec::new(),
+            server_config: None,
+            tls: None,
+            prometheus_address: None,
+            access_log: true,
+            https_redirect: false,
+            compression_level: 0,
+            reload_config_path: None,
+            applied_config: None,
+            request_id: false,
+            error_pages: HashMap::new(),
+            upgrade: false,
+            pid_file: None,
+            upgrade_sock: None,
+        }
     }
 }
 
@@ -231,6 +244,9 @@ pub struct ServerBuilder {
     applied_config: Option<Config>,
     request_id: bool,
     error_pages: HashMap<u16, String>,
+    upgrade: bool,
+    pid_file: Option<String>,
+    upgrade_sock: Option<String>,
 }
 impl ServerBuilder {
     pub fn add_route(mut self, route: impl Into<Route>) -> Self {
@@ -281,6 +297,27 @@ impl ServerBuilder {
         self
     }
 
+    /// Take over the listening sockets of a running routini instead of binding them (graceful
+    /// upgrade). Start the new process with this, then send SIGQUIT to the old one.
+    pub fn upgrade(mut self, upgrade: bool) -> Self {
+        self.upgrade = upgrade;
+        self
+    }
+
+    /// Unix socket the listening sockets are handed over on during a graceful upgrade. Old and
+    /// new process must agree. Default: pingora's `/tmp/pingora_upgrade.sock`; the config file
+    /// path defaults to a private runtime directory instead.
+    pub fn upgrade_sock(mut self, path: impl Into<String>) -> Self {
+        self.upgrade_sock = Some(path.into());
+        self
+    }
+
+    /// PID file written when daemonized. Default: pingora's `/tmp/pingora.pid`.
+    pub fn pid_file(mut self, path: impl Into<String>) -> Self {
+        self.pid_file = Some(path.into());
+        self
+    }
+
     /// The config the routes were built from, so reloads can tell which route settings changed
     /// and which changes need a restart. Without it every reloaded route counts as changed.
     pub fn applied_config(mut self, config: Config) -> Self {
@@ -323,7 +360,19 @@ impl ServerBuilder {
         server_config
             .graceful_shutdown_timeout_seconds
             .get_or_insert(DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT.as_secs());
-        let mut server = Server::new_with_opt_and_conf(None, server_config);
+        if let Some(pid_file) = self.pid_file {
+            server_config.pid_file = pid_file;
+        }
+        if let Some(upgrade_sock) = self.upgrade_sock {
+            server_config.upgrade_sock = upgrade_sock;
+        }
+        // Daemonizing is done by the binary before any threads exist, see main.rs
+        server_config.daemon = false;
+        let opt = Opt {
+            upgrade: self.upgrade,
+            ..Default::default()
+        };
+        let mut server = Server::new_with_opt_and_conf(opt, server_config);
 
         for route in &self.routes {
             match &route.host {

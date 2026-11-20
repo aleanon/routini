@@ -23,12 +23,14 @@ use crate::{
         AccessControl, CacheConfig, HeaderRules, HostRewrite, PassiveHealthConfig, RetryConfig,
         RouteAction, RouteConfig, TimeoutConfig, UpstreamTls,
     },
-    server_builder::{Route, ServerBuilder, TlsConfig as BuilderTlsConfig, proxy_server},
+    server_builder::{Route, ServerBuilder, TlsConfig as BuilderTlsConfig},
     utils::{
         config_loader::ConfigFormat,
         constants::{
-            LISTEN_ADDRESS_ENV_VAR, PROMETHEUS_ADDRESS_ENV_VAR, PROMETHEUS_ENDPOINT_ADDRESS,
+            LISTEN_ADDRESS_ENV_VAR, PID_FILE_NAME, PROMETHEUS_ADDRESS_ENV_VAR,
+            PROMETHEUS_ENDPOINT_ADDRESS, UPGRADE_SOCK_NAME,
         },
+        runtime_paths::default_runtime_dir,
     },
 };
 
@@ -115,30 +117,29 @@ impl Config {
         }
     }
 
+    /// Every address routini listens on, by config field.
+    fn listen_addresses(&self) -> Vec<(&'static str, String)> {
+        let mut addresses = vec![("proxy.listener", self.proxy.listener.address())];
+        if let Some(tls) = &self.proxy.tls {
+            addresses.push(("proxy.tls.listener", tls.listener.address()));
+        }
+        addresses.push((
+            "server.prometheus_address",
+            self.server
+                .prometheus_address
+                .clone()
+                .unwrap_or_else(|| PROMETHEUS_ENDPOINT_ADDRESS.to_string()),
+        ));
+        addresses
+    }
+
     /// Check the whole config and report every problem found, not just the first.
     pub fn validate(&self) -> Result<()> {
         let mut errors = Vec::new();
 
         // Listen addresses must parse and not collide
         let mut addresses: Vec<(&str, SocketAddr)> = Vec::new();
-        let listeners = [
-            ("proxy.listener", Some(self.proxy.listener.address())),
-            (
-                "proxy.tls.listener",
-                self.proxy.tls.as_ref().map(|t| t.listener.address()),
-            ),
-            (
-                "server.prometheus_address",
-                Some(
-                    self.server
-                        .prometheus_address
-                        .clone()
-                        .unwrap_or_else(|| PROMETHEUS_ENDPOINT_ADDRESS.to_string()),
-                ),
-            ),
-        ];
-        for (field, address) in &listeners {
-            let Some(address) = address else { continue };
+        for (field, address) in &self.listen_addresses() {
             match address.parse::<SocketAddr>() {
                 Ok(addr) => {
                     if let Some((other, _)) = addresses.iter().find(|(_, o)| overlaps(o, &addr)) {
@@ -163,6 +164,14 @@ impl Config {
                     "server.error_pages: {code} is not an HTTP status code"
                 ));
             }
+        }
+        let upgrade_sock = self.server.upgrade_sock();
+        if upgrade_sock.len() > MAX_UNIX_SOCKET_PATH {
+            errors.push(format!(
+                "server.upgrade_sock is {} bytes, unix socket paths can be at most \
+                 {MAX_UNIX_SOCKET_PATH}",
+                upgrade_sock.len()
+            ));
         }
         if self.server.worker_threads == Some(0) {
             errors.push("server.worker_threads must be greater than 0".to_string());
@@ -201,11 +210,27 @@ impl Config {
     /// [Self::validate] first ([crate::utils::config_loader::load_config_from] does). The config is
     /// kept as the builder's applied config, so reloads can diff against it.
     pub fn into_server_builder(self) -> Result<ServerBuilder> {
-        // Binding up front gives a clear error if the port is taken. The listener is dropped
-        // again, pingora binds the address itself when the service starts.
-        let listener = TcpListener::bind(self.listen_address())
-            .wrap_err_with(|| format!("Failed to bind to {}", self.listen_address()))?;
-        let mut builder = proxy_server(listener);
+        self.into_server_builder_with(false)
+    }
+
+    /// [Self::into_server_builder], with `upgrade` taking over the listening sockets of a running
+    /// routini instead of binding them (graceful upgrade).
+    pub fn into_server_builder_with(self, upgrade: bool) -> Result<ServerBuilder> {
+        if !upgrade {
+            // Binding up front gives a clear error if a port is taken. Otherwise pingora retries
+            // the bind forever while holding its listener lock, which blocks the other listeners
+            // and graceful upgrades. The listeners are dropped again, pingora binds the
+            // addresses itself. Skipped on upgrade: the old process still holds the ports and
+            // hands them over.
+            for (field, address) in self.listen_addresses() {
+                TcpListener::bind(&address)
+                    .wrap_err_with(|| format!("Failed to bind {field} {address}"))?;
+            }
+        }
+        let mut builder = ServerBuilder::new(self.listen_address())
+            .pid_file(self.server.pid_file())
+            .upgrade_sock(self.server.upgrade_sock())
+            .upgrade(upgrade);
 
         let server = &self.server;
         if server.has_runtime_tuning() {
@@ -322,7 +347,37 @@ pub struct ServerConfig {
     pub grace_period_seconds: Option<u64>,
     /// Graceful-shutdown hard timeout (seconds).
     pub graceful_shutdown_timeout_seconds: Option<u64>,
+    /// PID file written with `--daemon`. Default: `$XDG_RUNTIME_DIR/routini.pid`, or
+    /// `/run/routini/routini.pid`. Refused in directories other users can write to.
+    pub pid_file: Option<String>,
+    /// Unix socket the listening sockets are handed over on during `--upgrade`; the old and new
+    /// process must use the same path. Default and restrictions as for `pid_file`.
+    pub upgrade_sock: Option<String>,
 }
+
+impl ServerConfig {
+    pub fn pid_file(&self) -> String {
+        self.pid_file
+            .clone()
+            .unwrap_or_else(|| default_runtime_path(PID_FILE_NAME))
+    }
+
+    pub fn upgrade_sock(&self) -> String {
+        self.upgrade_sock
+            .clone()
+            .unwrap_or_else(|| default_runtime_path(UPGRADE_SOCK_NAME))
+    }
+}
+
+fn default_runtime_path(name: &str) -> String {
+    default_runtime_dir()
+        .join(name)
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// sun_path holds 108 bytes including the terminating NUL; pingora panics on longer paths.
+const MAX_UNIX_SOCKET_PATH: usize = 107;
 
 impl ServerConfig {
     /// Whether any server-level runtime tuning was provided.
@@ -855,6 +910,8 @@ pub struct UpstreamConfig {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     const MINIMAL_JSON: &str = r#"{"proxy": {"listener": 3500, "router": [
@@ -1027,6 +1084,48 @@ mod tests {
             1,
         );
         toml(&vhost).validate().unwrap();
+    }
+
+    #[test]
+    fn pid_file_and_upgrade_sock_default_to_the_runtime_dir() {
+        let config = toml(MINIMAL_TOML);
+        let dir = default_runtime_dir();
+        assert_eq!(
+            PathBuf::from(config.server.pid_file()),
+            dir.join(PID_FILE_NAME)
+        );
+        assert_eq!(
+            PathBuf::from(config.server.upgrade_sock()),
+            dir.join(UPGRADE_SOCK_NAME)
+        );
+        assert!(!config.server.upgrade_sock().starts_with("/tmp/"));
+
+        let custom = toml(&format!(
+            "[server]\npid_file = \"/run/x/r.pid\"\nupgrade_sock = \"/run/x/u.sock\"\n{MINIMAL_TOML}"
+        ));
+        assert_eq!(custom.server.pid_file(), "/run/x/r.pid");
+        assert_eq!(custom.server.upgrade_sock(), "/run/x/u.sock");
+    }
+
+    #[test]
+    fn too_long_upgrade_socket_path_is_rejected() {
+        let long = format!("/run/{}/up.sock", "x".repeat(110));
+        let config = toml(&format!(
+            "[server]\nupgrade_sock = \"{long}\"\n{MINIMAL_TOML}"
+        ));
+        assert!(errors_of(&config).contains("server.upgrade_sock"));
+    }
+
+    #[test]
+    fn a_taken_metrics_port_fails_fast_with_the_field_name() {
+        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let config = toml(&format!(
+            "[server]\nprometheus_address = \"{}\"\n{}",
+            taken.local_addr().unwrap(),
+            MINIMAL_TOML.replace("listener = 3500", "listener = \"127.0.0.1:0\"")
+        ));
+        let err = config.into_server_builder().err().unwrap().to_string();
+        assert!(err.contains("server.prometheus_address"), "{err}");
     }
 
     #[test]

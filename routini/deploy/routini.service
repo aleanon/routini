@@ -1,0 +1,35 @@
+# systemd unit for routini, following pingora's documented graceful upgrade setup.
+#
+#   systemctl reload routini   zero-downtime upgrade: a new process takes over the listening
+#                              sockets, the old one drains and exits. Picks up a new binary and
+#                              every config section, but runtime state starts fresh.
+#   systemctl kill -s HUP routini
+#                              in-place config reload (routes, backends, tuning), keeps state.
+#
+# The server.pid_file / server.upgrade_sock defaults (/run/routini/... when XDG_RUNTIME_DIR is
+# unset, as for system services) match RuntimeDirectory and PIDFile below. Run as a dedicated
+# user (User=routini) so /run/routini is private to the service.
+
+[Unit]
+Description=Routini adaptive reverse proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=forking
+PIDFile=/run/routini/routini.pid
+RuntimeDirectory=routini
+RuntimeDirectoryPreserve=yes
+WorkingDirectory=/etc/routini
+ExecStart=/usr/local/bin/routini --daemon --config /etc/routini/config.toml
+ExecStartPre=/usr/local/bin/routini --check --config /etc/routini/config.toml
+# Order does not matter, both sides of the socket handover retry for ~5s
+ExecReload=/usr/local/bin/routini --check --config /etc/routini/config.toml
+ExecReload=/bin/kill -QUIT $MAINPID
+ExecReload=/usr/local/bin/routini --daemon --upgrade --config /etc/routini/config.toml
+# Above [shutdown] grace_period_secs + timeout_secs
+TimeoutStopSec=15
+Environment=LOG_DIR=/var/log/routini
+
+[Install]
+WantedBy=multi-user.target

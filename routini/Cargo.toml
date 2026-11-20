@@ -66,6 +66,8 @@ atomic_float = "1.1.0"
 jemallocator = "0.5.4"
 dotenvy = "0.15"
 toml = "0.9"
+libc = "0.2"
+daemonize = "0.5"
 
 
 [dev-dependencies]

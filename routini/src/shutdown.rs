@@ -9,20 +9,28 @@
 //! | SIGTERM             | graceful: stop accepting, wait the grace period, stop runtimes    |
 //! | SIGINT (first)      | graceful, same as SIGTERM                                         |
 //! | SIGINT/SIGTERM again| force exit immediately with code 130, for when draining hangs     |
-//! | SIGQUIT             | graceful upgrade (hands listening sockets to a new process)       |
+//! | SIGQUIT             | graceful upgrade (hands listening sockets to a new process), only  |
+//! |                     | if the upgrade socket is ours, otherwise logged and ignored       |
 //!
 //! The grace period and runtime shutdown timeout are configured with
 //! [crate::server_builder::ServerBuilder::grace_period] and
 //! [crate::server_builder::ServerBuilder::graceful_shutdown_timeout].
 
+use std::path::PathBuf;
+
 use async_trait::async_trait;
 use pingora::server::{RunArgs, ShutdownSignal, ShutdownSignalWatch};
 use tokio::signal::unix::{SignalKind, signal};
 
+use crate::utils::runtime_paths::check_upgrade_socket;
+
 /// Exit code used when a second signal forces the process down (128 + SIGINT).
 const FORCED_EXIT_CODE: i32 = 130;
 
-pub struct RoutiniShutdownSignal;
+pub struct RoutiniShutdownSignal {
+    /// Checked on SIGQUIT before pingora hands the listening sockets to whoever listens on it.
+    pub upgrade_sock: PathBuf,
+}
 
 #[async_trait]
 impl ShutdownSignalWatch for RoutiniShutdownSignal {
@@ -33,10 +41,18 @@ impl ShutdownSignalWatch for RoutiniShutdownSignal {
         let mut interrupt =
             signal(SignalKind::interrupt()).expect("Failed to install SIGINT handler");
 
-        let shutdown = tokio::select! {
-            _ = upgrade.recv() => return ShutdownSignal::GracefulUpgrade,
-            _ = terminate.recv() => "SIGTERM",
-            _ = interrupt.recv() => "SIGINT",
+        let shutdown = loop {
+            tokio::select! {
+                _ = upgrade.recv() => match check_upgrade_socket(&self.upgrade_sock) {
+                    Ok(()) => return ShutdownSignal::GracefulUpgrade,
+                    Err(err) => tracing::error!(
+                        "SIGQUIT received, refusing graceful upgrade and keeping this process \
+                         running: {err:#}"
+                    ),
+                },
+                _ = terminate.recv() => break "SIGTERM",
+                _ = interrupt.recv() => break "SIGINT",
+            }
         };
 
         tracing::info!(
@@ -62,8 +78,11 @@ impl ShutdownSignalWatch for RoutiniShutdownSignal {
 }
 
 /// [RunArgs] using [RoutiniShutdownSignal]. Pass to [pingora::server::Server::run].
-pub fn run_args() -> RunArgs {
+/// `upgrade_sock` must match the server's [crate::config::ProcessSection::upgrade_sock].
+pub fn run_args(upgrade_sock: impl Into<PathBuf>) -> RunArgs {
     RunArgs {
-        shutdown_signal: Box::new(RoutiniShutdownSignal),
+        shutdown_signal: Box::new(RoutiniShutdownSignal {
+            upgrade_sock: upgrade_sock.into(),
+        }),
     }
 }
