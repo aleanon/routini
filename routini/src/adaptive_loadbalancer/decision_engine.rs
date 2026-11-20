@@ -1,5 +1,7 @@
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
+use arc_swap::ArcSwap;
+
 use crate::{
     adaptive_loadbalancer::{AdaptiveBackend, options::AdaptiveLbOpt},
     load_balancing::{
@@ -16,6 +18,10 @@ pub trait DecisionEngine {
         current_strategy: &Self::Strategy,
         backends: &Arc<BTreeSet<AdaptiveBackend>>,
     ) -> Self::Strategy;
+
+    /// Change the strategy the engine falls back to when no adaptive condition holds.
+    /// Called when the strategy is overridden manually. No-op by default.
+    fn set_default_strategy(&self, _strategy: Self::Strategy) {}
 }
 
 pub struct AdaptiveDecisionEngine {
@@ -28,6 +34,9 @@ pub struct AdaptiveDecisionEngine {
     /// Fraction of the enter thresholds used as exit thresholds. Provides hysteresis so the
     /// engine does not oscillate between strategies on every evaluation cycle.
     pub hysteresis_exit_factor: f32,
+    /// Strategy to return to when backends are balanced. Starts as the configured starting
+    /// strategy, replaced by manual overrides.
+    default_strategy: ArcSwap<Adaptive>,
 }
 
 impl AdaptiveDecisionEngine {
@@ -38,7 +47,13 @@ impl AdaptiveDecisionEngine {
             latency_divergence_ratio: opt.latency_divergence_ratio,
             min_nr_of_connections: opt.min_nr_of_connections,
             hysteresis_exit_factor: opt.hysteresis_exit_factor,
+            default_strategy: ArcSwap::from_pointee(opt.starting_strategy.clone()),
         }
+    }
+
+    /// The strategy used when no adaptive condition holds.
+    pub fn default_strategy(&self) -> Adaptive {
+        (**self.default_strategy.load()).clone()
     }
 
     /// Returns the spread between the slowest and fastest backend latencies (`max / min`),
@@ -124,7 +139,8 @@ impl DecisionEngine for AdaptiveDecisionEngine {
     /// 1. **Connection imbalance** (overload protection): if the busiest backend has crossed
     ///    `min_nr_of_connections` and connections are skewed, switch to `FewestConnections`.
     /// 2. **Latency divergence**: if some backends are markedly slower, switch to `FastestServer`.
-    /// 3. Otherwise fall back to `RoundRobin`.
+    /// 3. Otherwise fall back to the default strategy: the route's configured starting strategy,
+    ///    or the last manual override.
     ///
     /// Each signal uses a higher *enter* threshold than *exit* threshold (hysteresis): once a
     /// strategy is active it stays active until the metric improves past the lower exit threshold,
@@ -135,7 +151,7 @@ impl DecisionEngine for AdaptiveDecisionEngine {
         backends: &Arc<BTreeSet<AdaptiveBackend>>,
     ) -> Self::Strategy {
         if backends.len() < 2 {
-            return Adaptive::RoundRobin;
+            return self.default_strategy();
         }
 
         let exit = self.hysteresis_exit_factor;
@@ -166,8 +182,12 @@ impl DecisionEngine for AdaptiveDecisionEngine {
             }
         }
 
-        // 3. Balanced enough: even distribution.
-        Adaptive::RoundRobin
+        // 3. Balanced enough: the default strategy.
+        self.default_strategy()
+    }
+
+    fn set_default_strategy(&self, strategy: Self::Strategy) {
+        self.default_strategy.store(Arc::new(strategy));
     }
 }
 
@@ -210,6 +230,66 @@ mod tests {
 
     fn set(backends: impl IntoIterator<Item = AdaptiveBackend>) -> Arc<BTreeSet<AdaptiveBackend>> {
         Arc::new(backends.into_iter().collect())
+    }
+
+    fn engine_with_default(default: Adaptive) -> AdaptiveDecisionEngine {
+        AdaptiveDecisionEngine::new(&AdaptiveLbOpt {
+            min_nr_of_connections: 1,
+            starting_strategy: default,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn balanced_backends_fall_back_to_the_starting_strategy() {
+        let backends = set([
+            backend_with_connections("127.0.0.1:8080", 10),
+            backend_with_connections("127.0.0.1:8081", 10),
+        ]);
+        for default in [
+            Adaptive::RoundRobin,
+            Adaptive::Consistent,
+            Adaptive::FNVHash,
+        ] {
+            let engine = engine_with_default(default.clone());
+            for current in [
+                Adaptive::FastestServer,
+                Adaptive::FewestConnections,
+                Adaptive::Random,
+                default.clone(),
+            ] {
+                assert_eq!(
+                    engine.evaluate_strategy(&current, &backends),
+                    default,
+                    "from {current}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn single_backend_uses_the_starting_strategy() {
+        let engine = engine_with_default(Adaptive::Consistent);
+        let backends = set([backend_with_latency("127.0.0.1:8080", 500.0)]);
+        assert_eq!(
+            engine.evaluate_strategy(&Adaptive::FastestServer, &backends),
+            Adaptive::Consistent
+        );
+    }
+
+    #[test]
+    fn set_default_strategy_changes_the_fallback() {
+        let engine = engine_with_default(Adaptive::Consistent);
+        engine.set_default_strategy(Adaptive::Random);
+        assert_eq!(engine.default_strategy(), Adaptive::Random);
+        let backends = set([
+            backend_with_connections("127.0.0.1:8080", 10),
+            backend_with_connections("127.0.0.1:8081", 10),
+        ]);
+        assert_eq!(
+            engine.evaluate_strategy(&Adaptive::FastestServer, &backends),
+            Adaptive::Random
+        );
     }
 
     #[test]

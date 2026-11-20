@@ -75,7 +75,24 @@ impl<D: DecisionEngine> AdaptiveLoadBalancer<D> {
         self.lb.backends().set_enable(backend, enabled);
     }
 
-    pub async fn update_strategy(&self, new_strategy: Adaptive) -> bool {
+    /// The strategy the load balancer is currently selecting backends with.
+    pub async fn current_strategy(&self) -> Adaptive {
+        self.lb.current_strategy().await
+    }
+
+    pub fn decision_engine(&self) -> &D {
+        &self.decision_engine
+    }
+
+    /// Manually override the strategy. It also becomes the decision engine's default, so the
+    /// engine returns to it (instead of the configured starting strategy) whenever the backends
+    /// are balanced. Returns false if the strategy was already in use.
+    pub async fn update_strategy(&self, new_strategy: Adaptive) -> bool
+    where
+        D: DecisionEngine<Strategy = Adaptive>,
+    {
+        self.decision_engine
+            .set_default_strategy(new_strategy.clone());
         self.lb.update_strategy(new_strategy).await
     }
 }
