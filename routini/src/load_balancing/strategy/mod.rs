@@ -37,7 +37,6 @@ pub type FVNHash = fnv_hash::FNVHash;
 use super::Backend;
 use std::collections::BTreeSet;
 use std::hash::Hasher;
-use std::sync::Arc;
 use std::time::Duration;
 
 /// A builder for a backend selector, generic over the backend metrics type `M`.
@@ -55,20 +54,22 @@ pub trait Strategy<M: Metrics = NoMetric>: Send + Sync {
 /// [BackendSelection] is the interface to implement backend selection mechanisms.
 pub trait BackendSelection<M: Metrics = NoMetric>: Send + Sync {
     /// The [BackendIter] returned from iter() below.
-    type Iter: BackendIter<M>;
+    type Iter<'a>: BackendIter<'a, M>
+    where
+        Self: 'a;
 
     /// Select backends for a given key.
     ///
     /// An [BackendIter] should be returned. The first item in the iter is the first
     /// choice backend. The user should continue to iterate over it if the first backend
     /// cannot be used due to its health or other reasons.
-    fn iter(self: &Arc<Self>, key: &[u8]) -> Self::Iter;
+    fn iter<'a>(&'a self, key: &[u8]) -> Self::Iter<'a>;
 }
 
 /// An iterator to find the suitable backend
 ///
 /// Similar to [Iterator] but allow self referencing.
-pub trait BackendIter<M: Metrics = NoMetric> {
+pub trait BackendIter<'a, M: Metrics = NoMetric> {
     /// Return `Some(&Backend)` when there are more backends left to choose from.
     fn next(&mut self) -> Option<&Backend<M>>;
 }

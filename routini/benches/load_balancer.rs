@@ -31,7 +31,6 @@ fn benchmark_strategy<S>(
     backend_counts: &[usize],
 ) where
     S: Strategy + Clone,
-    <S::BackendSelector as BackendSelection>::Iter: BackendIter,
 {
     let mut group = c.benchmark_group(strategy_name);
 

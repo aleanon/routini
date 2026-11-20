@@ -15,7 +15,6 @@
 use std::{
     collections::{BTreeSet, HashSet},
     marker::PhantomData,
-    sync::Arc,
 };
 
 use fnv::FnvHasher;
@@ -56,27 +55,27 @@ impl<H: SelectionAlgorithm + Send + Sync, M: Metrics> WeightedSelector<H, M> {
     }
 }
 
-impl<H: SelectionAlgorithm + Send + Sync, M: Metrics> BackendSelection<M> for WeightedSelector<H, M> {
-    type Iter = WeightedIterator<H, M>;
+impl<H: SelectionAlgorithm + Send + Sync + 'static, M: Metrics> BackendSelection<M> for WeightedSelector<H, M> {
+    type Iter<'a> = WeightedIterator<'a, H, M>;
 
-    fn iter(self: &Arc<Self>, key: &[u8]) -> Self::Iter {
-        WeightedIterator::new(key, self.clone())
+    fn iter<'a>(&'a self, key: &[u8]) -> Self::Iter<'a> {
+        WeightedIterator::new(key, self)
     }
 }
 
 /// An iterator over the backends of a [Weighted] selection.
 ///
 /// See [super::BackendSelection] for more information.
-pub struct WeightedIterator<H, M: Metrics = NoMetric> {
+pub struct WeightedIterator<'a, H, M: Metrics = NoMetric> {
     // the unbounded index seed
     index: u64,
-    backend: Arc<WeightedSelector<H, M>>,
+    backend: &'a WeightedSelector<H, M>,
     first: bool,
 }
 
-impl<H: SelectionAlgorithm, M: Metrics> WeightedIterator<H, M> {
+impl<'a, H: SelectionAlgorithm, M: Metrics> WeightedIterator<'a, H, M> {
     /// Constructs a new [WeightedIterator].
-    fn new(input: &[u8], backend: Arc<WeightedSelector<H, M>>) -> Self {
+    fn new(input: &[u8], backend: &'a WeightedSelector<H, M>) -> Self {
         Self {
             index: backend.algorithm.next(input),
             backend,
@@ -85,7 +84,7 @@ impl<H: SelectionAlgorithm, M: Metrics> WeightedIterator<H, M> {
     }
 }
 
-impl<H: SelectionAlgorithm, M: Metrics> BackendIter<M> for WeightedIterator<H, M> {
+impl<'a, H: SelectionAlgorithm, M: Metrics> BackendIter<'a, M> for WeightedIterator<'a, H, M> {
     fn next(&mut self) -> Option<&Backend<M>> {
         if self.backend.backends.is_empty() {
             // short circuit if empty
@@ -110,20 +109,20 @@ impl<H: SelectionAlgorithm, M: Metrics> BackendIter<M> for WeightedIterator<H, M
 
 /// An iterator which wraps another iterator and yields unique items. It optionally takes a max
 /// number of iterations if the wrapped iterator never returns.
-pub struct UniqueIterator<I, M: Metrics = NoMetric>
+pub struct UniqueIterator<'a, I, M: Metrics = NoMetric>
 where
-    I: BackendIter<M>,
+    I: BackendIter<'a, M>,
 {
     iter: I,
     seen: HashSet<u64>,
     max_iterations: usize,
     steps: usize,
-    _phantom: PhantomData<M>,
+    _phantom: PhantomData<(&'a (), M)>,
 }
 
-impl<I, M: Metrics> UniqueIterator<I, M>
+impl<'a, I, M: Metrics> UniqueIterator<'a, I, M>
 where
-    I: BackendIter<M>,
+    I: BackendIter<'a, M>,
 {
     /// Wrap a new iterator and specify the maximum number of times we want to iterate.
     pub fn new(iter: I, max_iterations: usize) -> Self {
@@ -170,7 +169,7 @@ mod tests {
             }
         }
     }
-    impl BackendIter for TestIter {
+    impl<'a> BackendIter<'a> for TestIter {
         fn next(&mut self) -> Option<&Backend> {
             let idx = self.idx;
             self.idx += 1;

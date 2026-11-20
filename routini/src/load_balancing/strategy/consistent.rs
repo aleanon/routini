@@ -60,23 +60,23 @@ pub struct KetamaHashingSelector<M: Metrics = NoMetric> {
 }
 
 impl<M: Metrics> BackendSelection<M> for KetamaHashingSelector<M> {
-    type Iter = OwnedNodeIterator<M>;
+    type Iter<'a> = OwnedNodeIterator<'a, M>;
 
-    fn iter(self: &Arc<Self>, key: &[u8]) -> Self::Iter {
+    fn iter<'a>(&'a self, key: &[u8]) -> Self::Iter<'a> {
         OwnedNodeIterator {
             idx: self.ring.node_idx(key),
-            ring: self.clone(),
+            ring: self,
         }
     }
 }
 
 /// Iterator over a Continuum
-pub struct OwnedNodeIterator<M: Metrics = NoMetric> {
+pub struct OwnedNodeIterator<'a, M: Metrics = NoMetric> {
     idx: usize,
-    ring: Arc<KetamaHashingSelector<M>>,
+    ring: &'a KetamaHashingSelector<M>,
 }
 
-impl<M: Metrics> BackendIter<M> for OwnedNodeIterator<M> {
+impl<'a, M: Metrics> BackendIter<'a, M> for OwnedNodeIterator<'a, M> {
     fn next(&mut self) -> Option<&Backend<M>> {
         self.ring.ring.get_addr(&mut self.idx).and_then(|addr| {
             let addr = SocketAddr::Inet(*addr);
@@ -87,6 +87,8 @@ impl<M: Metrics> BackendIter<M> for OwnedNodeIterator<M> {
 
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+
     use super::*;
 
     #[test]

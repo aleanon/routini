@@ -77,22 +77,22 @@ pub struct FastestServerSelector<M: Metrics = NoMetric> {
 }
 
 impl<M: Metrics> BackendSelection<M> for FastestServerSelector<M> {
-    type Iter = FastestServerIter<M>;
+    type Iter<'a> = FastestServerIter<'a, M>;
 
-    fn iter(self: &std::sync::Arc<Self>, _key: &[u8]) -> Self::Iter {
+    fn iter<'a>(&'a self, _key: &[u8]) -> Self::Iter<'a> {
         FastestServerIter {
-            selector: self.clone(),
+            selector: self,
             index: 0,
         }
     }
 }
 
-pub struct FastestServerIter<M: Metrics = NoMetric> {
-    selector: Arc<FastestServerSelector<M>>,
+pub struct FastestServerIter<'a, M: Metrics = NoMetric> {
+    selector: &'a FastestServerSelector<M>,
     index: usize,
 }
 
-impl<M: Metrics> BackendIter<M> for FastestServerIter<M> {
+impl<'a, M: Metrics> BackendIter<'a, M> for FastestServerIter<'a, M> {
     fn next(&mut self) -> Option<&Backend<M>> {
         let backend = self.selector.backends.get(self.index)?;
         self.index += 1;

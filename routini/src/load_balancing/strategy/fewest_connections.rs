@@ -73,20 +73,20 @@ pub struct FewestConnectionsSelector<M: Metrics = NoMetric> {
 }
 
 impl<M: Metrics> BackendSelection<M> for FewestConnectionsSelector<M> {
-    type Iter = FewestConnectionsIter<M>;
+    type Iter<'a> = FewestConnectionsIter<'a, M>;
 
-    fn iter(self: &Arc<Self>, key: &[u8]) -> Self::Iter {
-        FewestConnectionsIter::new(self.clone(), key)
+    fn iter<'a>(&'a self, key: &[u8]) -> Self::Iter<'a> {
+        FewestConnectionsIter::new(self, key)
     }
 }
 
-pub struct FewestConnectionsIter<M: Metrics = NoMetric> {
-    least_connections: Arc<FewestConnectionsSelector<M>>,
+pub struct FewestConnectionsIter<'a, M: Metrics = NoMetric> {
+    least_connections: &'a FewestConnectionsSelector<M>,
     index: usize,
 }
 
-impl<M: Metrics> FewestConnectionsIter<M> {
-    fn new(least_connections: Arc<FewestConnectionsSelector<M>>, _key: &[u8]) -> Self {
+impl<'a, M: Metrics> FewestConnectionsIter<'a, M> {
+    fn new(least_connections: &'a FewestConnectionsSelector<M>, _key: &[u8]) -> Self {
         Self {
             least_connections,
             index: 0,
@@ -94,7 +94,7 @@ impl<M: Metrics> FewestConnectionsIter<M> {
     }
 }
 
-impl<M: Metrics> BackendIter<M> for FewestConnectionsIter<M> {
+impl<'a, M: Metrics> BackendIter<'a, M> for FewestConnectionsIter<'a, M> {
     fn next(&mut self) -> Option<&Backend<M>> {
         let backend = self.least_connections.backends.get(self.index)?;
         self.index += 1;

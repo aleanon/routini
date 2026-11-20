@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, fmt::Display, sync::Arc, time::Duration};
+use std::{collections::BTreeSet, fmt::Display, time::Duration};
 
 use serde::Deserialize;
 
@@ -55,41 +55,37 @@ impl<M: Metrics> Strategy<M> for Adaptive {
     fn build_backend_selector(&self, backends: &BTreeSet<Backend<M>>) -> Self::BackendSelector {
         match self {
             Adaptive::RoundRobin => {
-                AdaptiveSelector::RoundRobin(Arc::new(RoundRobin.build_backend_selector(backends)))
+                AdaptiveSelector::RoundRobin(RoundRobin.build_backend_selector(backends))
             }
             Adaptive::Random => {
-                AdaptiveSelector::Random(Arc::new(Random.build_backend_selector(backends)))
+                AdaptiveSelector::Random(Random.build_backend_selector(backends))
             }
             Adaptive::FNVHash => {
-                AdaptiveSelector::FNVHash(Arc::new(FNVHash.build_backend_selector(backends)))
+                AdaptiveSelector::FNVHash(FNVHash.build_backend_selector(backends))
             }
             Adaptive::Consistent => {
-                AdaptiveSelector::Consistent(Arc::new(Consistent.build_backend_selector(backends)))
+                AdaptiveSelector::Consistent(Consistent.build_backend_selector(backends))
             }
-            Adaptive::FewestConnections => AdaptiveSelector::FewestConnections(Arc::new(
-                FewestConnections.build_backend_selector(backends),
-            )),
-            Adaptive::FastestServer => AdaptiveSelector::FastestServer(Arc::new(
-                FastestServer.build_backend_selector(backends),
-            )),
+            Adaptive::FewestConnections => AdaptiveSelector::FewestConnections(FewestConnections.build_backend_selector(backends)),
+            Adaptive::FastestServer => AdaptiveSelector::FastestServer(FastestServer.build_backend_selector(backends)),
         }
     }
 }
 
 pub enum AdaptiveSelector<M: Metrics = NoMetric> {
-    RoundRobin(Arc<RoundRobinSelector<M>>),
-    Random(Arc<RandomSelector<M>>),
-    FNVHash(Arc<FNVHashSelector<M>>),
-    Consistent(Arc<ConsistentSelector<M>>),
-    FewestConnections(Arc<FewestConnectionsSelector<M>>),
-    FastestServer(Arc<FastestServerSelector<M>>),
+    RoundRobin(RoundRobinSelector<M>),
+    Random(RandomSelector<M>),
+    FNVHash(FNVHashSelector<M>),
+    Consistent(ConsistentSelector<M>),
+    FewestConnections(FewestConnectionsSelector<M>),
+    FastestServer(FastestServerSelector<M>),
 }
 
 impl<M: Metrics> BackendSelection<M> for AdaptiveSelector<M> {
-    type Iter = AdaptiveIter<M>;
+    type Iter<'a> = AdaptiveIter<'a, M>;
 
-    fn iter(self: &Arc<Self>, key: &[u8]) -> Self::Iter {
-        match &**self {
+    fn iter<'a>(&'a self, key: &[u8]) -> Self::Iter<'a> {
+        match self {
             AdaptiveSelector::RoundRobin(selector) => AdaptiveIter::RoundRobin(selector.iter(key)),
             AdaptiveSelector::Random(selector) => AdaptiveIter::Random(selector.iter(key)),
             AdaptiveSelector::FNVHash(selector) => AdaptiveIter::FNVHash(selector.iter(key)),
@@ -104,16 +100,16 @@ impl<M: Metrics> BackendSelection<M> for AdaptiveSelector<M> {
     }
 }
 
-pub enum AdaptiveIter<M: Metrics = NoMetric> {
-    RoundRobin(<RoundRobinSelector<M> as BackendSelection<M>>::Iter),
-    Random(<RandomSelector<M> as BackendSelection<M>>::Iter),
-    FNVHash(<FNVHashSelector<M> as BackendSelection<M>>::Iter),
-    Consistent(<ConsistentSelector<M> as BackendSelection<M>>::Iter),
-    FewestConnections(<FewestConnectionsSelector<M> as BackendSelection<M>>::Iter),
-    FastestServer(<FastestServerSelector<M> as BackendSelection<M>>::Iter),
+pub enum AdaptiveIter<'a, M: Metrics = NoMetric> {
+    RoundRobin(<RoundRobinSelector<M> as BackendSelection<M>>::Iter<'a>),
+    Random(<RandomSelector<M> as BackendSelection<M>>::Iter<'a>),
+    FNVHash(<FNVHashSelector<M> as BackendSelection<M>>::Iter<'a>),
+    Consistent(<ConsistentSelector<M> as BackendSelection<M>>::Iter<'a>),
+    FewestConnections(<FewestConnectionsSelector<M> as BackendSelection<M>>::Iter<'a>),
+    FastestServer(<FastestServerSelector<M> as BackendSelection<M>>::Iter<'a>),
 }
 
-impl<M: Metrics> BackendIter<M> for AdaptiveIter<M> {
+impl<'a, M: Metrics> BackendIter<'a, M> for AdaptiveIter<'a, M> {
     fn next(&mut self) -> Option<&Backend<M>> {
         match self {
             AdaptiveIter::RoundRobin(iter) => iter.next(),
