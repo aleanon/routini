@@ -5,6 +5,14 @@ pub const SET_STRATEGY_ENDPOINT_ADDRESS: &str = "0.0.0.0:5000";
 pub const PROMETHEUS_ENDPOINT_NAME: &str = "prometheus";
 pub const PROMETHEUS_ENDPOINT_ADDRESS: &str = "0.0.0.0:9090";
 
+// Shutdown
+/// Time between receiving SIGTERM/SIGINT and stopping the runtimes. Listeners stop accepting new
+/// connections immediately, in-flight requests get this long to finish. Pingora's own default is
+/// 300s, which is longer than most orchestrators wait before sending SIGKILL.
+pub const DEFAULT_GRACE_PERIOD: Duration = Duration::from_secs(5);
+/// Time the runtimes get to exit after the grace period, before being forcefully dropped.
+pub const DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
 // Router defaults
 pub const DEFAULT_PATH_REMAINDER_IDENTIFIER: &str = "rest";
 pub const DEFAULT_WILDCARD_IDENTIFIER: &str = "{*rest}";

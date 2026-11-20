@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use log::error;
+use log::{error, info};
 use pingora::{server::ShutdownWatch, services::background::BackgroundService};
 use tokio::time::Instant;
 
@@ -12,7 +12,7 @@ use crate::adaptive_loadbalancer::{
 
 #[async_trait]
 impl BackgroundService for AdaptiveLoadBalancer<AdaptiveDecisionEngine> {
-    async fn start(&self, shutdown: ShutdownWatch) -> () {
+    async fn start(&self, mut shutdown: ShutdownWatch) -> () {
         // 136 years
         const NEVER: Duration = Duration::from_secs(u32::MAX as u64);
         let mut now = Instant::now();
@@ -24,6 +24,7 @@ impl BackgroundService for AdaptiveLoadBalancer<AdaptiveDecisionEngine> {
 
         loop {
             if *shutdown.borrow() {
+                info!("Shutdown signal received, stopping adaptive load balancer background tasks");
                 break;
             }
 
@@ -73,7 +74,17 @@ impl BackgroundService for AdaptiveLoadBalancer<AdaptiveDecisionEngine> {
                 unreachable!("Array contained no value")
             };
 
-            tokio::time::sleep_until(to_wake.into()).await;
+            // Wake on whichever comes first, so a shutdown is not delayed by a long sleep
+            tokio::select! {
+                _ = tokio::time::sleep_until(to_wake.into()) => {}
+                changed = shutdown.changed() => {
+                    // Err means the sender is gone, which only happens when the server is
+                    // being torn down, treat it as a shutdown as well.
+                    if changed.is_err() {
+                        break;
+                    }
+                }
+            }
             now = Instant::now();
         }
     }

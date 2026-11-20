@@ -2,6 +2,7 @@ use color_eyre::eyre::{Result, eyre};
 use pingora::server::configuration::ServerConf;
 use routini::{
     server_builder::proxy_server,
+    shutdown,
     utils::{
         config_loader::{CONFIG_PATH_ENV, DEFAULT_CONFIG_PATH, load_config_from},
         constants::{
@@ -110,5 +111,8 @@ fn main() -> Result<()> {
 
     builder = builder.reload_on_sighup(config_path);
 
-    builder.build().run_forever();
+    builder.build().run(shutdown::run_args());
+
+    tracing::info!("Shutdown complete");
+    Ok(())
 }

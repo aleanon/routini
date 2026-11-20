@@ -28,7 +28,8 @@ use crate::{
     route::RouteRuntime,
     set_strategy_endpoint::SetStrategyEndpoint,
     utils::constants::{
-        DEFAULT_PATH_CACHE_CAPACITY, DEFAULT_WILDCARD_IDENTIFIER, PROMETHEUS_ENDPOINT_ADDRESS,
+        DEFAULT_GRACE_PERIOD, DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT, DEFAULT_PATH_CACHE_CAPACITY,
+        DEFAULT_WILDCARD_IDENTIFIER, PROMETHEUS_ENDPOINT_ADDRESS,
     },
 };
 
@@ -295,6 +296,14 @@ impl ServerBuilder {
             config.upstream_keepalive_pool_size = 200000;
             config
         });
+        let mut server_config = server_config;
+        // Pingora defaults to a 300s grace period, longer than orchestrators wait before SIGKILL
+        server_config
+            .grace_period_seconds
+            .get_or_insert(DEFAULT_GRACE_PERIOD.as_secs());
+        server_config
+            .graceful_shutdown_timeout_seconds
+            .get_or_insert(DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT.as_secs());
         let mut server = Server::new_with_opt_and_conf(None, server_config);
 
         let mut default_router = Router::new();

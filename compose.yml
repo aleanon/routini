@@ -10,6 +10,9 @@ services:
       context: .
       dockerfile: routini/Dockerfile
     network_mode: host
+    # Must exceed the grace period + shutdown timeout (default 5s + 5s), otherwise docker sends
+    # SIGKILL before in-flight requests have drained.
+    stop_grace_period: 15s
     depends_on:
       - worker-1
       - worker-2
