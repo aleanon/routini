@@ -161,6 +161,9 @@ impl DecisionEngine for AdaptiveDecisionEngine {
     /// 3. Otherwise fall back to the default strategy: the route's configured starting strategy,
     ///    or the last manual override.
     ///
+    /// A hash strategy as the default is kept regardless of metrics: clients rely on reaching
+    /// the same backend (sessions, caches), and the load-based strategies ignore the key.
+    ///
     /// Each signal uses a higher *enter* threshold than *exit* threshold (hysteresis): once a
     /// strategy is active it stays active until the metric improves past the lower exit threshold,
     /// preventing rapid flapping (and the selector rebuilds that come with it).
@@ -169,8 +172,9 @@ impl DecisionEngine for AdaptiveDecisionEngine {
         current_strategy: &Self::Strategy,
         backends: &Arc<BTreeSet<AdaptiveBackend>>,
     ) -> Self::Strategy {
-        if backends.len() < 2 {
-            return self.default_strategy();
+        let default = self.default_strategy();
+        if backends.len() < 2 || default.is_key_affine() {
+            return default;
         }
 
         let t = self.thresholds.load();
@@ -203,7 +207,7 @@ impl DecisionEngine for AdaptiveDecisionEngine {
         }
 
         // 3. Balanced enough: the default strategy.
-        self.default_strategy()
+        default
     }
 
     fn set_default_strategy(&self, strategy: Self::Strategy) {
@@ -289,6 +293,28 @@ mod tests {
                     "from {current}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn hash_strategies_are_never_switched_away_from() {
+        let engine = engine();
+        let skewed = set([
+            backend_with_latency("127.0.0.1:8080", 1.0),
+            backend_with_latency("127.0.0.1:8081", 500.0),
+        ]);
+        assert_eq!(
+            engine.evaluate_strategy(&Adaptive::RoundRobin, &skewed),
+            Adaptive::FastestServer
+        );
+        for hash in [Adaptive::FNVHash, Adaptive::Consistent] {
+            let engine = engine_with_default(hash.clone());
+            assert_eq!(engine.evaluate_strategy(&hash, &skewed), hash);
+            // Also leaves a load-based strategy a manual override had replaced it with
+            assert_eq!(
+                engine.evaluate_strategy(&Adaptive::FastestServer, &skewed),
+                hash
+            );
         }
     }
 

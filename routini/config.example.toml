@@ -23,6 +23,11 @@ strip_prefix = true
 strategy = "RoundRobin"
 max_iterations = 100
 health_check_interval_secs = 1
+# What FNVHash/Consistent hash, so a client keeps its backend (nginx ip_hash / hash):
+# "client_ip" (default), "uri", "path", "header:<name>" or "cookie:<name>". A missing
+# header/cookie falls back to the client address. With a hash strategy as `strategy` the
+# adaptive engine never switches away from it.
+# hash_key = "client_ip"
 
 # Adaptive tuning, all optional (defaults shown in comments)
 [proxy.router.load_balancer.adaptive_lb_opt]

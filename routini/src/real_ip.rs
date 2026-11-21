@@ -127,7 +127,10 @@ mod tests {
             r.resolve(ip("10.0.0.1"), &headers(&["10.0.0.3, 10.0.0.2"])),
             Some(ip("10.0.0.3"))
         );
-        assert_eq!(r.resolve(ip("10.0.0.1"), &HeaderMap::new()), Some(ip("10.0.0.1")));
+        assert_eq!(
+            r.resolve(ip("10.0.0.1"), &HeaderMap::new()),
+            Some(ip("10.0.0.1"))
+        );
     }
 
     #[test]

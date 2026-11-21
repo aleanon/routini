@@ -28,7 +28,7 @@ use pingora::{
 use std::collections::HashMap;
 
 use crate::{
-    adaptive_loadbalancer::AdaptiveBackend,
+    adaptive_loadbalancer::{AdaptiveBackend, options::HashKey},
     load_balancing::Metrics,
     real_ip::RealIp,
     route::{RouteAction, RouteRuntime, RouteState},
@@ -104,6 +104,55 @@ fn https_location(
     };
     let path = path_and_query.filter(|p| p.starts_with('/')).unwrap_or("/");
     Some(format!("https://{host}{port}{path}"))
+}
+
+/// The bytes the hash strategies select a backend with, see [HashKey]. Borrowed from the
+/// request where possible; the client address is written to `ip_buf`. A missing header or
+/// cookie falls back to the client address, so such requests still spread across backends.
+fn hash_key<'a>(
+    key: &HashKey,
+    req: &'a RequestHeader,
+    client: Option<IpAddr>,
+    ip_buf: &'a mut [u8; 16],
+) -> &'a [u8] {
+    let found = match key {
+        HashKey::ClientIp => None,
+        HashKey::Uri => Some(
+            req.uri
+                .path_and_query()
+                .map_or(req.uri.path(), |pq| pq.as_str())
+                .as_bytes(),
+        ),
+        HashKey::Path => Some(req.uri.path().as_bytes()),
+        HashKey::Header(name) => req.headers.get(name).map(|v| v.as_bytes()),
+        HashKey::Cookie(name) => cookie(req, name).map(str::as_bytes),
+    };
+    if let Some(found) = found {
+        return found;
+    }
+    match client {
+        Some(IpAddr::V4(ip)) => {
+            ip_buf[..4].copy_from_slice(&ip.octets());
+            &ip_buf[..4]
+        }
+        Some(IpAddr::V6(ip)) => {
+            *ip_buf = ip.octets();
+            &ip_buf[..]
+        }
+        None => &[],
+    }
+}
+
+/// The value of cookie `name`, from any of the request's `Cookie` headers.
+fn cookie<'a>(req: &'a RequestHeader, name: &str) -> Option<&'a str> {
+    req.headers
+        .get_all(http::header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .filter_map(|pair| pair.trim().split_once('='))
+        .find(|(n, _)| *n == name)
+        .map(|(_, value)| value.trim_matches('"'))
 }
 
 /// Parse the request's `Content-Length`, if present and valid.
@@ -758,7 +807,18 @@ impl ProxyHttp for Proxy {
         // Pick a healthy backend we have not already tried this request. A retry (driven by
         // `fail_to_connect`) re-enters here with the previous backend recorded, so failover lands
         // on a different upstream. Once exhausted the error is non-retryable.
-        let backend = route.runtime.lb.select_excluding(&ctx.tried).ok_or(Error {
+        let lb = &route.runtime.lb;
+        let backend = {
+            let mut ip_buf = [0; 16];
+            let key = hash_key(
+                &lb.config().hash_key,
+                session.req_header(),
+                ctx.client_ip,
+                &mut ip_buf,
+            );
+            lb.select_excluding(key, &ctx.tried)
+        };
+        let backend = backend.ok_or(Error {
             context: Some(ImmutStr::Static("No healthy backends available")),
             cause: None,
             etype: ErrorType::InternalError,
@@ -1012,6 +1072,37 @@ impl ProxyHttp for Proxy {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+
+    #[test]
+    fn hash_key_picks_the_configured_part_of_the_request() {
+        let mut req = RequestHeader::build("GET", b"/a/b?x=1", None).unwrap();
+        req.append_header("cookie", "theme=dark; session=\"abc\"")
+            .unwrap();
+        req.append_header("cookie", "late=1").unwrap();
+        req.insert_header("x-user", "u42").unwrap();
+        let v4: Option<IpAddr> = "198.51.100.7".parse().ok();
+        let v6: Option<IpAddr> = "2001:db8::1".parse().ok();
+        let mut buf = [0; 16];
+
+        assert_eq!(hash_key(&HashKey::Uri, &req, v4, &mut buf), b"/a/b?x=1");
+        assert_eq!(hash_key(&HashKey::Path, &req, v4, &mut buf), b"/a/b");
+        let header = HashKey::Header(http::HeaderName::from_static("x-user"));
+        assert_eq!(hash_key(&header, &req, v4, &mut buf), b"u42");
+        let session = HashKey::Cookie("session".into());
+        assert_eq!(hash_key(&session, &req, v4, &mut buf), b"abc");
+        let late = HashKey::Cookie("late".into());
+        assert_eq!(hash_key(&late, &req, v4, &mut buf), b"1");
+
+        assert_eq!(
+            hash_key(&HashKey::ClientIp, &req, v4, &mut buf),
+            &[198, 51, 100, 7]
+        );
+        assert_eq!(hash_key(&HashKey::ClientIp, &req, v6, &mut buf).len(), 16);
+        // Missing header or cookie: the client address
+        let missing = HashKey::Cookie("nope".into());
+        assert_eq!(hash_key(&missing, &req, v4, &mut buf), &[198, 51, 100, 7]);
+        assert_eq!(hash_key(&HashKey::ClientIp, &req, None, &mut buf), b"");
+    }
 
     use crate::{
         adaptive_loadbalancer::{

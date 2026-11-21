@@ -59,8 +59,8 @@ async fn set_latencies(lb: &Lb, ms: [u64; 2]) {
 
 #[tokio::test]
 async fn switches_to_fastest_server_on_latency_divergence_and_back_to_starting_strategy() {
-    let (lb, tx, _handle) = start_lb(Adaptive::Consistent);
-    wait_for(&lb, Adaptive::Consistent).await;
+    let (lb, tx, _handle) = start_lb(Adaptive::RoundRobin);
+    wait_for(&lb, Adaptive::RoundRobin).await;
 
     set_latencies(&lb, [10, 100]).await;
     wait_for(&lb, Adaptive::FastestServer).await;
@@ -72,7 +72,20 @@ async fn switches_to_fastest_server_on_latency_divergence_and_back_to_starting_s
     );
 
     set_latencies(&lb, [50, 50]).await;
+    wait_for(&lb, Adaptive::RoundRobin).await;
+    tx.send(true).unwrap();
+}
+
+#[tokio::test]
+async fn hash_strategy_keeps_affinity_under_latency_divergence() {
+    let (lb, tx, _handle) = start_lb(Adaptive::Consistent);
     wait_for(&lb, Adaptive::Consistent).await;
+    set_latencies(&lb, [10, 100]).await;
+    // Several evaluation rounds (every 20ms)
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(lb.current_strategy().await, Adaptive::Consistent);
+    let first = lb.select(b"client-a").unwrap();
+    assert_eq!(lb.select(b"client-a").unwrap(), first);
     tx.send(true).unwrap();
 }
 

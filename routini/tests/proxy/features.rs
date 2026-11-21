@@ -99,3 +99,75 @@ async fn forwarded_header_is_ignored_from_untrusted_peers() {
     );
     assert_eq!(res.text().await.unwrap(), "proto=http;for=127.0.0.1");
 }
+
+/// The backend that served each of `users`, sending the user id the way `send` attaches it.
+async fn backends_per_user(
+    app: &ReloadApp,
+    users: impl Iterator<Item = String>,
+    send: impl Fn(reqwest::RequestBuilder, &str) -> reqwest::RequestBuilder,
+) -> Vec<String> {
+    let mut served = Vec::new();
+    for user in users {
+        let req = app.client.get(format!("{}/a/health", app.base));
+        let res = send(req, &user).send().await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        served.push(res.text().await.unwrap());
+    }
+    served
+}
+
+#[tokio::test]
+async fn hash_strategies_are_sticky_per_hash_key() {
+    let b = TestApp::create_backends(4).await.unwrap();
+    let backends: Vec<_> = b.iter().collect();
+    let users = || (0..40).map(|i| format!("user-{i}"));
+    let by_header = |req: reqwest::RequestBuilder, user: &str| req.header("x-user", user);
+    let lb = |strategy: &str, key: &str| format!("strategy = \"{strategy}\"\nhash_key = \"{key}\"");
+
+    for strategy in ["FNVHash", "Consistent"] {
+        let ports = Ports::new();
+        let lb_header = lb(strategy, "header:X-User");
+        let app = ReloadApp::start(
+            ports_config(&ports, &route("/a/*", &backends, "", &lb_header)),
+            None,
+        )
+        .await;
+
+        let first = backends_per_user(&app, users(), by_header).await;
+        let again = backends_per_user(&app, users(), by_header).await;
+        assert_eq!(first, again, "{strategy}: each user keeps its backend");
+        let distinct: std::collections::HashSet<_> = first.iter().collect();
+        assert!(
+            distinct.len() >= 2,
+            "{strategy}: users spread over backends, got {distinct:?}"
+        );
+
+        // Switching the key to a cookie applies on reload
+        let lb_cookie = lb(strategy, "cookie:sid");
+        app.manager
+            .reload(ports_config(
+                &ports,
+                &route("/a/*", &backends, "", &lb_cookie),
+            ))
+            .await
+            .unwrap();
+        let by_cookie = |req: reqwest::RequestBuilder, user: &str| {
+            req.header("cookie", format!("theme=x; sid={user}"))
+        };
+        let cookie = backends_per_user(&app, users(), by_cookie).await;
+        assert_eq!(cookie, backends_per_user(&app, users(), by_cookie).await);
+        assert!(
+            cookie
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                >= 2
+        );
+        // Same value hashed, whether it came from the header or the cookie
+        assert_eq!(cookie, first, "{strategy}");
+    }
+}
+
+fn ports_config(ports: &Ports, routes: &str) -> Config {
+    config(ports, "", routes)
+}

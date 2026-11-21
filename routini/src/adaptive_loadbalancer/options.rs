@@ -1,4 +1,6 @@
-use std::time::Duration;
+use std::{str::FromStr, time::Duration};
+
+use http::HeaderName;
 
 use crate::{
     load_balancing::strategy::Adaptive,
@@ -22,6 +24,63 @@ pub struct AdaptiveLbOpt {
     pub min_nr_of_connections: usize,
     /// Fraction of the enter thresholds used as exit thresholds (hysteresis).
     pub hysteresis_exit_factor: f32,
+    /// What the hash strategies (FNVHash, Consistent) hash to pick a backend.
+    pub hash_key: HashKey,
+}
+
+/// The part of a request the hash strategies select a backend with, so requests with the same
+/// key go to the same backend (nginx `ip_hash`, `hash $request_uri`, `hash $cookie_x`). Other
+/// strategies ignore it.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum HashKey {
+    /// The client address (see [crate::real_ip]).
+    #[default]
+    ClientIp,
+    /// Path and query.
+    Uri,
+    /// Path without the query.
+    Path,
+    /// A request header's value. Requests without it fall back to the client address.
+    Header(HeaderName),
+    /// A cookie's value. Requests without it fall back to the client address.
+    Cookie(String),
+}
+
+impl FromStr for HashKey {
+    type Err = String;
+
+    /// `client_ip`, `uri`, `path`, `header:<name>` or `cookie:<name>`.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let invalid = || {
+            format!(
+                "invalid hash key '{s}', expected client_ip, uri, path, header:<name> or \
+                 cookie:<name>"
+            )
+        };
+        Ok(match s.split_once(':') {
+            None => match s {
+                "client_ip" => HashKey::ClientIp,
+                "uri" => HashKey::Uri,
+                "path" => HashKey::Path,
+                _ => return Err(invalid()),
+            },
+            Some(("header", name)) => HashKey::Header(
+                HeaderName::from_bytes(name.trim().as_bytes()).map_err(|_| invalid())?,
+            ),
+            Some(("cookie", name)) if valid_cookie_name(name.trim()) => {
+                HashKey::Cookie(name.trim().to_string())
+            }
+            Some(_) => return Err(invalid()),
+        })
+    }
+}
+
+/// A cookie name is a non-empty token (RFC 6265).
+fn valid_cookie_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_graphic() && !b"()<>@,;:\\\"/[]?={}".contains(&b))
 }
 
 impl Default for AdaptiveLbOpt {
@@ -36,6 +95,7 @@ impl Default for AdaptiveLbOpt {
             health_check_interval: Some(DEFAULT_HEALTH_CHECK_FREQUENCY),
             min_nr_of_connections: DEFAULT_MIN_NR_OF_CONNECTIONS,
             hysteresis_exit_factor: DEFAULT_HYSTERESIS_EXIT_FACTOR,
+            hash_key: HashKey::default(),
         }
     }
 }
@@ -51,6 +111,7 @@ pub struct AdaptiveLbConfig {
     pub health_check_interval: Option<Duration>,
     pub min_nr_of_connections: usize,
     pub hysteresis_exit_factor: f32,
+    pub hash_key: HashKey,
 }
 
 impl From<AdaptiveLbOpt> for AdaptiveLbConfig {
@@ -70,6 +131,37 @@ impl From<&AdaptiveLbOpt> for AdaptiveLbConfig {
             health_check_interval: value.health_check_interval,
             min_nr_of_connections: value.min_nr_of_connections,
             hysteresis_exit_factor: value.hysteresis_exit_factor,
+            hash_key: value.hash_key.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hash_keys_parse() {
+        assert_eq!("client_ip".parse(), Ok(HashKey::ClientIp));
+        assert_eq!("uri".parse(), Ok(HashKey::Uri));
+        assert_eq!("path".parse(), Ok(HashKey::Path));
+        assert_eq!(
+            "header:X-User-Id".parse(),
+            Ok(HashKey::Header(HeaderName::from_static("x-user-id")))
+        );
+        assert_eq!(
+            "cookie: session".parse(),
+            Ok(HashKey::Cookie("session".into()))
+        );
+        for bad in [
+            "ip",
+            "header:",
+            "header:bad name",
+            "cookie:",
+            "cookie:a=b",
+            "query:x",
+        ] {
+            assert!(bad.parse::<HashKey>().is_err(), "{bad}");
         }
     }
 }

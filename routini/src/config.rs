@@ -535,7 +535,7 @@ impl RouteEntry {
             upstreams.push(("127.0.0.1:1".to_string(), 1));
         }
 
-        let lb_opt = self.load_balancer.to_lb_opt();
+        let lb_opt = self.load_balancer.to_lb_opt()?;
         let built = if self.regex {
             Route::regex(&self.path, upstreams, lb_opt)?
         } else {
@@ -907,12 +907,15 @@ pub struct LoadBalancerConfig {
     pub max_iterations: Option<usize>,
     /// Health check interval in seconds; `0` disables the health check background service.
     pub health_check_interval_secs: Option<u64>,
+    /// What FNVHash/Consistent hash: `client_ip` (default), `uri`, `path`, `header:<name>` or
+    /// `cookie:<name>`.
+    pub hash_key: Option<String>,
     pub upstreams: Vec<UpstreamConfig>,
 }
 
 impl LoadBalancerConfig {
     /// Merge the config over [`AdaptiveLbOpt::default`], leaving unset fields at their defaults.
-    fn to_lb_opt(&self) -> AdaptiveLbOpt {
+    fn to_lb_opt(&self) -> Result<AdaptiveLbOpt> {
         let mut opt = AdaptiveLbOpt {
             starting_strategy: self.strategy.clone(),
             ..Default::default()
@@ -944,8 +947,13 @@ impl LoadBalancerConfig {
         if let Some(v) = a.hysteresis_exit_factor {
             opt.hysteresis_exit_factor = v;
         }
+        if let Some(key) = &self.hash_key {
+            opt.hash_key = key
+                .parse()
+                .map_err(|err| eyre!("load_balancer.hash_key: {err}"))?;
+        }
 
-        opt
+        Ok(opt)
     }
 }
 

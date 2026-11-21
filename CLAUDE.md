@@ -135,6 +135,9 @@ LOG_JSON=1 cargo run
   `reconfigure` applies new tuning live and wakes the background task
 - **Decision Engine**: connection imbalance first (FewestConnections), then latency divergence
   (FastestServer), else the route's starting strategy (a manual `update_strategy` replaces it).
+  A hash strategy (FNVHash/Consistent) as the default is never switched away from (affinity)
+- **Hash key**: `load_balancer.hash_key` (`HashKey` in `options.rs`, part of the reloadable
+  `AdaptiveLbConfig`); `proxy::hash_key` extracts it per request without allocating
   Hysteresis: exit threshold = 1 + (enter - 1) * hysteresis_exit_factor
 - **Background task** per route: discovery, health checks, strategy evaluation, selector rebuild
 

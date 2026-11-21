@@ -98,14 +98,16 @@ impl<D: DecisionEngine> AdaptiveLoadBalancer<D> {
         self.lb.select(key, self.config.load().max_iterations)
     }
 
-    /// Select a healthy backend whose address is not in `exclude`. Used for per-request failover
-    /// so a retry lands on a different backend than the one that just failed.
+    /// Select a healthy backend for `key` (see [options::HashKey]) whose address is not in
+    /// `exclude`. Used for per-request failover so a retry lands on a different backend than the
+    /// one that just failed; hash strategies then continue to the key's next backend.
     pub fn select_excluding(
         &self,
+        key: &[u8],
         exclude: &[pingora::protocols::l4::socket::SocketAddr],
     ) -> Option<AdaptiveBackend> {
         self.lb.select_with(
-            &[],
+            key,
             self.config.load().max_iterations,
             |backend, healthy| healthy && !exclude.iter().any(|addr| addr == &backend.addr),
         )

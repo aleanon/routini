@@ -27,6 +27,14 @@ pub enum Adaptive {
     FastestServer,
 }
 
+impl Adaptive {
+    /// Whether the strategy maps a request's key to a backend (session affinity) rather than
+    /// balancing load. Switching away from it would move clients between backends.
+    pub fn is_key_affine(&self) -> bool {
+        matches!(self, Adaptive::FNVHash | Adaptive::Consistent)
+    }
+}
+
 impl Display for Adaptive {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
