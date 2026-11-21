@@ -995,6 +995,9 @@ pub struct LoadBalancerConfig {
     pub hash_key: Option<String>,
     /// How backends are probed while `health_check_interval_secs` > 0. Default: TCP connect.
     pub health_check: Option<HealthCheckInput>,
+    /// How often upstream hostnames are resolved again, in seconds; 0 resolves them once.
+    /// Default 30.
+    pub dns_refresh_secs: Option<u64>,
     pub upstreams: Vec<UpstreamConfig>,
 }
 
@@ -1036,6 +1039,9 @@ impl LoadBalancerConfig {
             opt.hash_key = key
                 .parse()
                 .map_err(|err| eyre!("load_balancer.hash_key: {err}"))?;
+        }
+        if let Some(secs) = self.dns_refresh_secs {
+            opt.discovery_interval = (secs > 0).then(|| Duration::from_secs(secs));
         }
         if let Some(check) = &self.health_check {
             if opt.health_check_interval.is_none() {
@@ -1322,6 +1328,24 @@ mod tests {
         ] {
             assert!(err.contains(expected), "missing '{expected}' in:\n{err}");
         }
+    }
+
+    #[test]
+    fn upstreams_may_be_hostnames_resolved_on_an_interval() {
+        let config = toml(&MINIMAL_TOML.replace("127.0.0.1:4001", "api.internal:4001"));
+        config.validate().unwrap();
+        let lb = &config.proxy.router[0].load_balancer;
+        let opt = lb.to_lb_opt(&Default::default()).unwrap();
+        assert_eq!(opt.discovery_interval, Some(Duration::from_secs(30)));
+
+        let config = with_lb("[proxy.router.load_balancer]\ndns_refresh_secs = 0");
+        let lb = &config.proxy.router[0].load_balancer;
+        assert_eq!(
+            lb.to_lb_opt(&Default::default())
+                .unwrap()
+                .discovery_interval,
+            None
+        );
     }
 
     #[test]

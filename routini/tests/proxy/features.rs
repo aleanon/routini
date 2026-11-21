@@ -545,3 +545,16 @@ async fn a_lone_backend_is_retried_when_its_pooled_connection_went_stale() {
         [200; 6]
     );
 }
+
+#[tokio::test]
+async fn upstreams_can_be_hostnames() {
+    let b = TestApp::create_backends(1).await.unwrap();
+    let port = b[0].rsplit_once(':').unwrap().1;
+    let named = format!("localhost:{port}");
+    let ports = Ports::new();
+    let app = ReloadApp::start(config(&ports, "", &route("/a/*", &[&named], "", "")), None).await;
+    // localhost may also resolve to ::1, where the worker doesn't listen: connect errors fail
+    // over to 127.0.0.1
+    let (status, body) = app.get("/a/health").await;
+    assert_eq!((status, body), (StatusCode::OK, b[0].clone()));
+}

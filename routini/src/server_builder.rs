@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::HashMap,
     net::TcpListener,
     path::PathBuf,
     sync::{Arc, LazyLock},
@@ -21,11 +21,11 @@ use pingora::{
 use regex::Regex;
 
 use crate::{
-    adaptive_loadbalancer::{AdaptiveBackend, AdaptiveBackends, options::AdaptiveLbOpt},
+    adaptive_loadbalancer::{AdaptiveBackends, options::AdaptiveLbOpt},
     config::Config,
     load_balancing::{
         Backends,
-        discovery::Static,
+        discovery::{Upstream, UpstreamDiscovery},
         strategy::{Adaptive, adaptive::AdaptiveStrategyMetrics},
     },
     proxy::ClientTimeouts,
@@ -102,9 +102,9 @@ pub struct Route {
     /// When true, `path` is a regex location matched against the full request path (default server
     /// only), tried after matchit routes (nginx `location ~ <regex>`).
     pub is_regex: bool,
-    /// Handle to the static discovery inside [Self::backends], used to change the backend set of
-    /// a running route on config reload.
-    pub(crate) discovery: Arc<Static<AdaptiveStrategyMetrics>>,
+    /// Handle to the discovery inside [Self::backends], used to change the upstreams of a
+    /// running route on config reload.
+    pub(crate) discovery: Arc<UpstreamDiscovery<AdaptiveStrategyMetrics>>,
 }
 
 impl Route {
@@ -180,28 +180,22 @@ impl Route {
         })
     }
 
+    /// Upstreams are `ip:port` or `hostname:port`; names are resolved by the route's
+    /// background task (see [UpstreamDiscovery]), not here.
     fn build_discovery(
         backends: impl IntoIterator<Item = (String, usize)>,
-    ) -> Result<Arc<Static<AdaptiveStrategyMetrics>>> {
-        Ok(Arc::from(Static::new(Self::build_backend_set(backends)?)))
-    }
-
-    fn build_backend_set(
-        backends: impl IntoIterator<Item = (String, usize)>,
-    ) -> Result<BTreeSet<AdaptiveBackend>> {
-        let backends = backends
+    ) -> Result<Arc<UpstreamDiscovery<AdaptiveStrategyMetrics>>> {
+        let upstreams = backends
             .into_iter()
             .map(|(addr, weight)| {
-                // `build` constructs the default plain-HTTP peer and `AdaptiveStrategyMetrics`.
-                AdaptiveBackend::build(&addr, weight.max(1))
+                Upstream::parse(&addr, weight.max(1))
                     .map_err(|err| eyre!("Invalid backend address '{addr}': {err}"))
             })
-            .collect::<Result<BTreeSet<_>>>()?;
-
-        if backends.is_empty() {
+            .collect::<Result<Vec<_>>>()?;
+        if upstreams.is_empty() {
             return Err(eyre!("Must provide at least one backend"));
         }
-        Ok(backends)
+        Ok(Arc::new(UpstreamDiscovery::new(upstreams)))
     }
 
     /// Restrict this route to a named virtual host (nginx `server_name`).

@@ -128,8 +128,9 @@ LOG_JSON=1 cargo run
 - `Backend<M: Metrics = NoMetric>`: metrics are a monomorphized type parameter
 - Six strategies: RoundRobin, Random, FNVHash, Consistent (Ketama), FewestConnections,
   FastestServer (EWMA). `BackendSelection::iter(&'a self)` returns a borrowing GAT iterator
-- Static discovery (shared via `Arc<Static>` so reload can change backends), TCP or HTTP
-  health checks (`HealthCheckOpt`; HTTP probes follow the route's `upstream_tls`)
+- `UpstreamDiscovery` (shared via `Arc` so reload can change upstreams): IP or `hostname:port`
+  upstreams, names re-resolved every `dns_refresh_secs` keeping the last good result; TCP or
+  HTTP health checks (`HealthCheckOpt`; HTTP probes follow the route's `upstream_tls`)
 
 **Adaptive Load Balancer** (`routini/src/adaptive_loadbalancer/`)
 - `AdaptiveLoadBalancer<D: DecisionEngine>`; config and engine thresholds behind `ArcSwap`,

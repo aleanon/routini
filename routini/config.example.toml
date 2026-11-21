@@ -59,6 +59,10 @@ health_check_interval_secs = 1
 # header/cookie falls back to the client address. With a hash strategy as `strategy` the
 # adaptive engine never switches away from it.
 # hash_key = "client_ip"
+# Upstream addresses may be "hostname:port"; each address a name resolves to becomes a
+# backend. Names are resolved again every dns_refresh_secs (0 = once); a failed lookup keeps
+# the previous addresses.
+# dns_refresh_secs = 30
 
 # How backends are probed while health_check_interval_secs > 0. Default: a TCP connect.
 # HTTP probes use the route's upstream_tls (scheme, SNI, verification).

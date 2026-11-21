@@ -38,7 +38,7 @@ use crate::{
     },
     config::{Config, RouteEntry},
     load_balancing::{
-        discovery::Static,
+        discovery::UpstreamDiscovery,
         strategy::{Adaptive, adaptive::AdaptiveStrategyMetrics},
     },
     proxy::{Proxy, RouteValue, RoutingTable},
@@ -78,8 +78,8 @@ struct RouteTask {
 struct ManagedRoute {
     key: RouteKey,
     runtime: Arc<RouteRuntime>,
-    /// Handle to the static discovery inside the load balancer, to change its backend set.
-    discovery: Arc<Static<AdaptiveStrategyMetrics>>,
+    /// Handle to the discovery inside the load balancer, to change its upstreams.
+    discovery: Arc<UpstreamDiscovery<AdaptiveStrategyMetrics>>,
     /// The strategy from the config, to tell a config change from a manual override.
     configured_strategy: Adaptive,
     task: Option<RouteTask>,

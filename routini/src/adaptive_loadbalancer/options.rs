@@ -5,8 +5,9 @@ use http::HeaderName;
 use crate::{
     load_balancing::strategy::Adaptive,
     utils::constants::{
-        DEFAULT_CONNECTIONS_DIV_RATIO, DEFAULT_EVALUATE_STRATEGY_FREQUENCY,
-        DEFAULT_HEALTH_CHECK_FREQUENCY, DEFAULT_HYSTERESIS_EXIT_FACTOR, DEFAULT_LATENCY_DIV_RATIO,
+        DEFAULT_CONNECTIONS_DIV_RATIO, DEFAULT_DISCOVERY_INTERVAL,
+        DEFAULT_EVALUATE_STRATEGY_FREQUENCY, DEFAULT_HEALTH_CHECK_FREQUENCY,
+        DEFAULT_HYSTERESIS_EXIT_FACTOR, DEFAULT_LATENCY_DIV_RATIO,
         DEFAULT_MAX_ALGORITHM_ITERATIONS, DEFAULT_MIN_NR_OF_CONNECTIONS, DEFAULT_SMOOTHING_FACTOR,
     },
 };
@@ -28,6 +29,8 @@ pub struct AdaptiveLbOpt {
     pub hash_key: HashKey,
     /// How backends are probed, when `health_check_interval` is set.
     pub health_check: HealthCheckOpt,
+    /// How often service discovery runs again, resolving upstream DNS names. `None`: once.
+    pub discovery_interval: Option<Duration>,
 }
 
 /// An active health check (nginx Plus `health_check`): how a backend is probed and how many
@@ -150,6 +153,7 @@ impl Default for AdaptiveLbOpt {
             hysteresis_exit_factor: DEFAULT_HYSTERESIS_EXIT_FACTOR,
             hash_key: HashKey::default(),
             health_check: HealthCheckOpt::default(),
+            discovery_interval: Some(DEFAULT_DISCOVERY_INTERVAL),
         }
     }
 }
@@ -166,6 +170,7 @@ pub struct AdaptiveLbConfig {
     pub min_nr_of_connections: usize,
     pub hysteresis_exit_factor: f32,
     pub hash_key: HashKey,
+    pub discovery_interval: Option<Duration>,
 }
 
 impl From<AdaptiveLbOpt> for AdaptiveLbConfig {
@@ -186,6 +191,7 @@ impl From<&AdaptiveLbOpt> for AdaptiveLbConfig {
             min_nr_of_connections: value.min_nr_of_connections,
             hysteresis_exit_factor: value.hysteresis_exit_factor,
             hash_key: value.hash_key.clone(),
+            discovery_interval: value.discovery_interval,
         }
     }
 }

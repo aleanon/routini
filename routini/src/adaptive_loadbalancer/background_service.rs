@@ -32,7 +32,7 @@ impl BackgroundService for AdaptiveLoadBalancer<AdaptiveDecisionEngine> {
                 if let Err(err) = self.lb.update().await {
                     error!("Failed to update load balancer: {}", err);
                 }
-                next_update = now + self.lb.update_frequency.unwrap_or(NEVER);
+                next_update = now + self.config().discovery_interval.unwrap_or(NEVER);
             }
 
             if next_health_check <= now {
@@ -77,9 +77,10 @@ impl BackgroundService for AdaptiveLoadBalancer<AdaptiveDecisionEngine> {
             // Wake on whichever comes first, so a shutdown is not delayed by a long sleep
             tokio::select! {
                 _ = tokio::time::sleep_until(to_wake.into()) => {}
-                // Config reloaded: run health check and evaluation now, rescheduling them with
-                // the new intervals
+                // Config reloaded: run discovery, health check and evaluation now, rescheduling
+                // them with the new intervals
                 _ = self.wait_reconfigured() => {
+                    next_update = Instant::now();
                     next_health_check = Instant::now();
                     next_strategy_eval = Instant::now();
                 }

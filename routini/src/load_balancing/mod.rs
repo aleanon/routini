@@ -127,6 +127,19 @@ impl<M: Metrics> Backend<M> {
         // TODO: UDS
     }
 
+    /// A plain-HTTP backend at `addr`.
+    pub fn from_socket_addr(addr: std::net::SocketAddr, weight: usize) -> Self {
+        let addr = SocketAddr::Inet(addr);
+        let peer = HttpPeer::new(addr.clone(), false, String::new());
+        Backend {
+            addr,
+            weight,
+            ext: Extensions::new(),
+            peer,
+            metrics: M::default(),
+        }
+    }
+
     pub(crate) fn hash_key(&self) -> u64 {
         let mut hasher = DefaultHasher::new();
         self.hash(&mut hasher);

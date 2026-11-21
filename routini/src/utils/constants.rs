@@ -45,6 +45,9 @@ pub const DEFAULT_CONNECTIONS_DIV_RATIO: f32 = 1.2;
 pub const DEFAULT_LATENCY_DIV_RATIO: f32 = 2.0;
 pub const DEFAULT_EVALUATE_STRATEGY_FREQUENCY: Duration = Duration::from_secs(5);
 pub const DEFAULT_HEALTH_CHECK_FREQUENCY: Duration = Duration::from_secs(1);
+/// How often upstream DNS names are resolved again. Upstreams given as IP addresses don't
+/// need it, discovery is then a cheap no-op compare.
+pub const DEFAULT_DISCOVERY_INTERVAL: Duration = Duration::from_secs(30);
 pub const DEFAULT_MIN_NR_OF_CONNECTIONS: usize = 1000;
 /// Fraction of an enter threshold used as the exit threshold, giving the adaptive
 /// engine hysteresis so it does not flap between strategies on every evaluation.
