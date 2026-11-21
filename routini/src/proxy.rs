@@ -613,14 +613,12 @@ impl ProxyHttp for Proxy {
             }
 
             if access.requires_auth() {
-                let authorized = {
-                    let auth = session
-                        .req_header()
-                        .headers
-                        .get(http::header::AUTHORIZATION)
-                        .and_then(|h| h.to_str().ok());
-                    access.auth_ok(auth)
-                };
+                let auth = session
+                    .req_header()
+                    .headers
+                    .get(http::header::AUTHORIZATION)
+                    .and_then(|h| h.to_str().ok());
+                let authorized = access.auth_ok(auth).await;
                 if !authorized {
                     let realm = access.basic_auth_realm.as_deref().unwrap_or("Restricted");
                     let mut resp = ResponseHeader::build(StatusCode::UNAUTHORIZED.as_u16(), None)?;

@@ -171,3 +171,30 @@ async fn hash_strategies_are_sticky_per_hash_key() {
 fn ports_config(ports: &Ports, routes: &str) -> Config {
     config(ports, "", routes)
 }
+
+#[tokio::test]
+async fn basic_auth_accepts_bcrypt_hashes() {
+    let b = TestApp::create_backends(1).await.unwrap();
+    let hash = bcrypt::hash("s3cret", 4).unwrap();
+    let access = format!(
+        "[proxy.router.access]\nbasic_auth_realm = \"ops\"\nbasic_auth = [\"bob:{hash}\"]"
+    );
+    let app = ReloadApp::start(
+        ports_config(&Ports::new(), &route("/a/*", &[&b[0]], &access, "")),
+        None,
+    )
+    .await;
+
+    let get = |user: &'static str, password: &'static str| {
+        app.client
+            .get(format!("{}/a/health", app.base))
+            .basic_auth(user, Some(password))
+            .send()
+    };
+    assert_eq!(get("bob", "s3cret").await.unwrap().status(), StatusCode::OK);
+    let denied = get("bob", "wrong").await.unwrap();
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(denied.headers()["www-authenticate"], "Basic realm=\"ops\"");
+    let (status, _) = app.get("/a/health").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}

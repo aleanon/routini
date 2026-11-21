@@ -6,7 +6,6 @@
 //! hard-coded values.
 use std::{collections::HashMap, net::IpAddr, time::Duration};
 
-use base64::prelude::{BASE64_STANDARD, Engine};
 use std::net::{SocketAddr, TcpListener};
 
 use pingora::server::configuration::ServerConf;
@@ -18,6 +17,7 @@ use serde::Deserialize;
 
 use crate::{
     adaptive_loadbalancer::options::AdaptiveLbOpt,
+    basic_auth::BasicAuth,
     load_balancing::strategy::Adaptive,
     real_ip::RealIp,
     route::{
@@ -686,7 +686,8 @@ pub struct AccessInput {
     #[serde(default)]
     pub deny: Vec<String>,
     pub basic_auth_realm: Option<String>,
-    /// Accepted `user:password` credentials.
+    /// Accepted users: `user:<bcrypt hash>` as `htpasswd -nB user` prints it, or
+    /// `user:password`.
     #[serde(default)]
     pub basic_auth: Vec<String>,
 }
@@ -697,11 +698,7 @@ impl AccessInput {
             allow: parse_nets(&self.allow)?,
             deny: parse_nets(&self.deny)?,
             basic_auth_realm: self.basic_auth_realm.clone(),
-            basic_auth: self
-                .basic_auth
-                .iter()
-                .map(|cred| BASE64_STANDARD.encode(cred))
-                .collect(),
+            basic_auth: BasicAuth::new(&self.basic_auth).map_err(|err| eyre!("access: {err}"))?,
         })
     }
 }

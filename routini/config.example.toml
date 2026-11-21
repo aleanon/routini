@@ -19,6 +19,15 @@ listener = 3500
 path = "/api/*"
 strip_prefix = true
 
+# Access control, all optional (nginx allow/deny/auth_basic). Users are "user:<bcrypt hash>"
+# as `htpasswd -nB user` prints it (preferred, the password stays out of this file) or
+# "user:password".
+# [proxy.router.access]
+# allow = ["10.0.0.0/8"]
+# deny = ["10.1.2.3"]
+# basic_auth_realm = "ops"
+# basic_auth = ["alice:$2y$05$..."]
+
 [proxy.router.load_balancer]
 strategy = "RoundRobin"
 max_iterations = 100

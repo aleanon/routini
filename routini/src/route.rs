@@ -4,7 +4,7 @@
 //! bundles a route's config with its load balancer and is what the proxy stores per route and
 //! caches per concrete request path.
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     net::IpAddr,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -19,8 +19,11 @@ use pingora::protocols::l4::socket::SocketAddr;
 use pingora_limits::inflight::{Guard, Inflight};
 use pingora_limits::rate::Rate;
 
-use crate::adaptive_loadbalancer::{
-    AdaptiveBackend, AdaptiveLoadBalancer, decision_engine::AdaptiveDecisionEngine,
+use crate::{
+    adaptive_loadbalancer::{
+        AdaptiveBackend, AdaptiveLoadBalancer, decision_engine::AdaptiveDecisionEngine,
+    },
+    basic_auth::BasicAuth,
 };
 
 pub type SharedLb = Arc<AdaptiveLoadBalancer<AdaptiveDecisionEngine>>;
@@ -70,8 +73,8 @@ pub struct AccessControl {
     /// IPs within these networks are rejected (takes precedence over `allow`).
     pub deny: Vec<IpNet>,
     pub basic_auth_realm: Option<String>,
-    /// Accepted credentials as base64(`user:password`) tokens. Empty = no auth required.
-    pub basic_auth: HashSet<String>,
+    /// Accepted users. Empty = no auth required.
+    pub basic_auth: BasicAuth,
 }
 
 impl AccessControl {
@@ -91,14 +94,8 @@ impl AccessControl {
     }
 
     /// Validate an `Authorization` header value against the configured Basic credentials.
-    pub fn auth_ok(&self, authorization: Option<&str>) -> bool {
-        if self.basic_auth.is_empty() {
-            return true;
-        }
-        match authorization.and_then(|h| h.strip_prefix("Basic ")) {
-            Some(token) => self.basic_auth.contains(token.trim()),
-            None => false,
-        }
+    pub async fn auth_ok(&self, authorization: Option<&str>) -> bool {
+        self.basic_auth.is_empty() || self.basic_auth.verify(authorization).await
     }
 }
 
@@ -687,12 +684,12 @@ mod tests {
         assert_eq!(expired[0].addr, backend.addr);
     }
 
-    #[test]
-    fn access_control_ip_and_basic_auth() {
+    #[tokio::test]
+    async fn access_control_ip_and_basic_auth() {
         let ac = AccessControl {
             allow: vec!["10.0.0.0/8".parse().unwrap()],
             deny: vec!["10.1.2.3".parse::<IpAddr>().unwrap().into()],
-            basic_auth: ["dXNlcjpwYXNz".to_string()].into_iter().collect(), // base64("user:pass")
+            basic_auth: BasicAuth::new(&["user:pass".into()]).unwrap(),
             ..Default::default()
         };
 
@@ -707,9 +704,13 @@ mod tests {
         );
 
         assert!(ac.requires_auth());
-        assert!(ac.auth_ok(Some("Basic dXNlcjpwYXNz")));
-        assert!(!ac.auth_ok(Some("Basic d3Jvbmc=")));
-        assert!(!ac.auth_ok(None));
+        assert!(ac.auth_ok(Some("Basic dXNlcjpwYXNz")).await); // base64("user:pass")
+        assert!(!ac.auth_ok(Some("Basic d3Jvbmc=")).await);
+        assert!(!ac.auth_ok(None).await);
+        assert!(
+            AccessControl::default().auth_ok(None).await,
+            "no users: open"
+        );
     }
 
     #[test]
