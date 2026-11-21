@@ -176,9 +176,8 @@ fn ports_config(ports: &Ports, routes: &str) -> Config {
 async fn basic_auth_accepts_bcrypt_hashes() {
     let b = TestApp::create_backends(1).await.unwrap();
     let hash = bcrypt::hash("s3cret", 4).unwrap();
-    let access = format!(
-        "[proxy.router.access]\nbasic_auth_realm = \"ops\"\nbasic_auth = [\"bob:{hash}\"]"
-    );
+    let access =
+        format!("[proxy.router.access]\nbasic_auth_realm = \"ops\"\nbasic_auth = [\"bob:{hash}\"]");
     let app = ReloadApp::start(
         ports_config(&Ports::new(), &route("/a/*", &[&b[0]], &access, "")),
         None,
@@ -197,4 +196,68 @@ async fn basic_auth_accepts_bcrypt_hashes() {
     assert_eq!(denied.headers()["www-authenticate"], "Basic realm=\"ops\"");
     let (status, _) = app.get("/a/health").await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+/// A backend that accepts TCP connections and closes them without answering: healthy to a TCP
+/// check, broken for HTTP.
+async fn tcp_only_backend() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            drop(stream);
+        }
+    });
+    address
+}
+
+#[tokio::test]
+async fn http_health_check_takes_out_backends_tcp_would_keep() {
+    let b = TestApp::create_backends(1).await.unwrap();
+    let broken = tcp_only_backend().await;
+    let ports = Ports::new();
+    let config_with = |check: &str| {
+        let routes = route("/a/*", &[&b[0], &broken], "", check).replace(
+            "health_check_interval_secs = 0",
+            "health_check_interval_secs = 1",
+        );
+        ports_config(&ports, &routes)
+    };
+    // TCP check (the default). The broken backend accepts connections, so connect-error
+    // retries don't save the requests sent to it
+    let app = ReloadApp::start(config_with(""), None).await;
+
+    let statuses = |app: &ReloadApp| {
+        let (client, url) = (app.client.clone(), format!("{}/a/health", app.base));
+        async move {
+            let mut ok = 0;
+            for _ in 0..20 {
+                if client.get(&url).send().await.unwrap().status() == StatusCode::OK {
+                    ok += 1;
+                }
+            }
+            ok
+        }
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    assert!(
+        statuses(&app).await < 20,
+        "TCP check keeps the broken backend"
+    );
+
+    let report = app
+        .manager
+        .reload(config_with(
+            "[proxy.router.load_balancer.health_check]\ntype = \"http\"\npath = \"/health\"",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        report.rebuilt,
+        vec!["/a/*"],
+        "a changed check rebuilds the route"
+    );
+    // The rebuilt route probes before its backends are trusted again
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    assert_eq!(statuses(&app).await, 20);
 }

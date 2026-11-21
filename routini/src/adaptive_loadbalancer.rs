@@ -10,11 +10,11 @@ use tokio::sync::Notify;
 use crate::{
     adaptive_loadbalancer::{
         decision_engine::DecisionEngine,
-        options::{AdaptiveLbConfig, AdaptiveLbOpt},
+        options::{AdaptiveLbConfig, AdaptiveLbOpt, HealthCheckOpt, HealthProbe},
     },
     load_balancing::{
         Backend, Backends, LoadBalancer,
-        health_check::TcpHealthCheck,
+        health_check::{HealthCheck, HttpHealthCheck, TcpHealthCheck},
         strategy::{Adaptive, adaptive::AdaptiveStrategyMetrics},
     },
 };
@@ -24,14 +24,67 @@ pub type AdaptiveBackend = Backend<AdaptiveStrategyMetrics>;
 /// A [`Backends`] collection pinned to the adaptive metrics type.
 pub type AdaptiveBackends = Backends<AdaptiveStrategyMetrics>;
 
+fn build_health_check(
+    opt: &HealthCheckOpt,
+) -> Box<dyn HealthCheck<AdaptiveStrategyMetrics> + Send + Sync + 'static> {
+    match &opt.probe {
+        HealthProbe::Tcp => {
+            let mut check = TcpHealthCheck::new();
+            check.consecutive_success = opt.passes;
+            check.consecutive_failure = opt.fails;
+            check
+        }
+        HealthProbe::Http(probe) => {
+            let mut check = HttpHealthCheck::new(&probe.host, probe.tls.is_some());
+            check.consecutive_success = opt.passes;
+            check.consecutive_failure = opt.fails;
+            check.port_override = probe.port;
+            // Validated as a path when the config was read
+            if let Ok(mut req) =
+                pingora::http::RequestHeader::build("GET", probe.path.as_bytes(), None)
+            {
+                let _ = req.append_header("Host", &probe.host);
+                let _ = req.append_header("User-Agent", "routini-health-check");
+                check.req = req;
+            }
+            let peer = &mut check.peer_template;
+            peer.options.connection_timeout = Some(probe.timeout);
+            peer.options.read_timeout = Some(probe.timeout);
+            if let Some(tls) = &probe.tls {
+                peer.sni = tls.sni.clone();
+                peer.options.verify_cert = tls.verify;
+                peer.options.verify_hostname = tls.verify;
+            }
+            let expected = probe.expected_status.clone();
+            check.validator = Some(Box::new(move |resp| {
+                let status = resp.status.as_u16();
+                let healthy = if expected.is_empty() {
+                    (200..400).contains(&status)
+                } else {
+                    expected.contains(&status)
+                };
+                if healthy {
+                    Ok(())
+                } else {
+                    pingora::Error::e_explain(
+                        pingora::ErrorType::CustomCode("unexpected status", status),
+                        "during http health check",
+                    )
+                }
+            }));
+            Box::new(check)
+        }
+    }
+}
+
 pub struct AdaptiveLoadBalancer<D> {
     lb: LoadBalancer<Adaptive, AdaptiveStrategyMetrics>,
     decision_engine: D,
     /// Swapped as a whole by [Self::reconfigure], read on every request.
     config: ArcSwap<AdaptiveLbConfig>,
-    /// Whether a health check was installed at construction. Health checks can't be added or
-    /// removed afterwards, a reload that toggles them rebuilds the load balancer.
-    health_check_enabled: bool,
+    /// The health check installed at construction. Health checks can't be added, removed or
+    /// replaced afterwards, a reload that changes this rebuilds the load balancer.
+    health_check: Option<HealthCheckOpt>,
     /// Wakes the background service after [Self::reconfigure] so new intervals apply at once.
     reconfigured: Notify,
 }
@@ -46,18 +99,20 @@ impl<D: DecisionEngine> AdaptiveLoadBalancer<D> {
         let mut lb =
             LoadBalancer::from_backends_with_strategy(backends, options.starting_strategy.clone());
 
-        let health_check_enabled = options.health_check_interval.is_some();
-        if health_check_enabled {
-            let hc = TcpHealthCheck::new();
-            lb.set_health_check(hc);
-            lb.health_check_frequency = options.health_check_interval.clone()
+        let health_check = options
+            .health_check_interval
+            .is_some()
+            .then(|| options.health_check.clone());
+        if let Some(health_check) = &health_check {
+            lb.set_health_check(build_health_check(health_check));
+            lb.health_check_frequency = options.health_check_interval;
         }
 
         Self {
             lb,
             decision_engine,
             config: ArcSwap::from_pointee(AdaptiveLbConfig::from(options)),
-            health_check_enabled,
+            health_check,
             reconfigured: Notify::new(),
         }
     }
@@ -68,7 +123,12 @@ impl<D: DecisionEngine> AdaptiveLoadBalancer<D> {
     }
 
     pub fn health_check_enabled(&self) -> bool {
-        self.health_check_enabled
+        self.health_check.is_some()
+    }
+
+    /// The health check installed at construction, if any.
+    pub fn health_check(&self) -> Option<&HealthCheckOpt> {
+        self.health_check.as_ref()
     }
 
     /// Apply new tuning (thresholds, intervals, max iterations, smoothing factor) without

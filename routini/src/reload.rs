@@ -9,7 +9,7 @@
 //! | upstreams of an existing route                        | swapped live, kept backends keep metrics and health |
 //! | strategy, adaptive tuning, max_iterations, interval   | applied live to the running load balancer |
 //! | headers, timeouts, retry, limits, auth, cache, ...    | route state swapped (limiter counters reset) |
-//! | health checks enabled <-> disabled                    | that route is rebuilt (its metrics reset) |
+//! | health check added, removed or changed (not interval) | that route is rebuilt (its metrics reset) |
 //! | new / removed route                                   | started / stopped                         |
 //! | `server`, `proxy.listener`, `proxy.tls`               | reported as requiring a restart or upgrade |
 //! | TLS certificate files changed on disk                 | reported as requiring an upgrade (pingora's rustls listener can't swap them) |
@@ -132,7 +132,7 @@ pub struct ReloadReport {
     pub added: Vec<String>,
     pub removed: Vec<String>,
     pub updated: Vec<String>,
-    /// Routes rebuilt from scratch because health checks were toggled on or off.
+    /// Routes rebuilt from scratch because their health check was added, removed or changed.
     pub rebuilt: Vec<String>,
     pub unchanged: Vec<String>,
     /// Settings that changed in the file but only take effect after a restart or upgrade.
@@ -261,10 +261,11 @@ impl RouteManager {
         for (route, entry) in new_routes.into_iter().zip(&config.proxy.router) {
             let key = route_key(&route);
             let name = display_key(&key);
-            let health_check = route.lb_options.health_check_interval.is_some();
+            let opts = &route.lb_options;
+            let health_check = opts.health_check_interval.map(|_| &opts.health_check);
 
             let mut managed = match previous.remove(&key) {
-                Some(mut existing) if existing.lb().health_check_enabled() == health_check => {
+                Some(mut existing) if existing.lb().health_check() == health_check => {
                     if update_in_place(&mut existing, route, old_entries.get(&key), entry).await {
                         report.updated.push(name);
                     } else {

@@ -16,7 +16,9 @@ use ipnet::IpNet;
 use serde::Deserialize;
 
 use crate::{
-    adaptive_loadbalancer::options::AdaptiveLbOpt,
+    adaptive_loadbalancer::options::{
+        AdaptiveLbOpt, HealthCheckOpt, HealthProbe, HttpProbe, ProbeTls,
+    },
     basic_auth::BasicAuth,
     load_balancing::strategy::Adaptive,
     real_ip::RealIp,
@@ -535,7 +537,7 @@ impl RouteEntry {
             upstreams.push(("127.0.0.1:1".to_string(), 1));
         }
 
-        let lb_opt = self.load_balancer.to_lb_opt()?;
+        let lb_opt = self.load_balancer.to_lb_opt(&self.upstream_tls)?;
         let built = if self.regex {
             Route::regex(&self.path, upstreams, lb_opt)?
         } else {
@@ -907,12 +909,14 @@ pub struct LoadBalancerConfig {
     /// What FNVHash/Consistent hash: `client_ip` (default), `uri`, `path`, `header:<name>` or
     /// `cookie:<name>`.
     pub hash_key: Option<String>,
+    /// How backends are probed while `health_check_interval_secs` > 0. Default: TCP connect.
+    pub health_check: Option<HealthCheckInput>,
     pub upstreams: Vec<UpstreamConfig>,
 }
 
 impl LoadBalancerConfig {
     /// Merge the config over [`AdaptiveLbOpt::default`], leaving unset fields at their defaults.
-    fn to_lb_opt(&self) -> Result<AdaptiveLbOpt> {
+    fn to_lb_opt(&self, upstream_tls: &UpstreamTlsInput) -> Result<AdaptiveLbOpt> {
         let mut opt = AdaptiveLbOpt {
             starting_strategy: self.strategy.clone(),
             ..Default::default()
@@ -949,8 +953,115 @@ impl LoadBalancerConfig {
                 .parse()
                 .map_err(|err| eyre!("load_balancer.hash_key: {err}"))?;
         }
+        if let Some(check) = &self.health_check {
+            if opt.health_check_interval.is_none() {
+                return Err(eyre!(
+                    "load_balancer.health_check is set but health_check_interval_secs is 0"
+                ));
+            }
+            opt.health_check = check
+                .to_opt(upstream_tls)
+                .map_err(|err| eyre!("load_balancer.health_check: {err}"))?;
+        }
 
         Ok(opt)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HealthCheckType {
+    #[default]
+    Tcp,
+    Http,
+}
+
+/// Active health check (nginx Plus `health_check`, `match status=`).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HealthCheckInput {
+    /// `tcp` (connect, the default) or `http` (GET `path`, expect a status).
+    #[serde(rename = "type", default)]
+    pub kind: HealthCheckType,
+    /// http: path and query to request. Default `/`.
+    pub path: Option<String>,
+    /// http: `Host` header and SNI. Default: the route's `upstream_tls.sni`, else `localhost`.
+    pub host: Option<String>,
+    /// http: statuses counting as healthy. Default: any 2xx or 3xx.
+    #[serde(default)]
+    pub expected_status: Vec<u16>,
+    /// http: connect and read timeout in milliseconds. Default 1000.
+    pub timeout_ms: Option<u64>,
+    /// http: probe this port instead of the backend's.
+    pub port: Option<u16>,
+    /// Successful probes in a row that bring a backend back. Default 1.
+    pub passes: Option<usize>,
+    /// Failed probes in a row that take a backend out. Default 1.
+    pub fails: Option<usize>,
+}
+
+impl HealthCheckInput {
+    /// The probe, over TLS (with its SNI and verification) when the route's upstream is.
+    fn to_opt(&self, upstream_tls: &UpstreamTlsInput) -> Result<HealthCheckOpt> {
+        let passes = self.passes.unwrap_or(1);
+        let fails = self.fails.unwrap_or(1);
+        if passes == 0 || fails == 0 {
+            return Err(eyre!("passes and fails must be at least 1"));
+        }
+        let probe = match self.kind {
+            HealthCheckType::Tcp => {
+                let http_only = [
+                    ("path", self.path.is_some()),
+                    ("host", self.host.is_some()),
+                    ("expected_status", !self.expected_status.is_empty()),
+                    ("timeout_ms", self.timeout_ms.is_some()),
+                    ("port", self.port.is_some()),
+                ];
+                if let Some((field, _)) = http_only.iter().find(|(_, set)| *set) {
+                    return Err(eyre!("{field} only applies to type = \"http\""));
+                }
+                HealthProbe::Tcp
+            }
+            HealthCheckType::Http => {
+                let path = self.path.clone().unwrap_or_else(|| "/".to_string());
+                if !path.starts_with('/') || path.parse::<http::uri::PathAndQuery>().is_err() {
+                    return Err(eyre!("path '{path}' must be an absolute path like /health"));
+                }
+                if let Some(code) = self
+                    .expected_status
+                    .iter()
+                    .find(|c| !(100..=599).contains(*c))
+                {
+                    return Err(eyre!("expected_status {code} is not an HTTP status code"));
+                }
+                if self.timeout_ms == Some(0) {
+                    return Err(eyre!("timeout_ms must be greater than 0"));
+                }
+                let host = self
+                    .host
+                    .clone()
+                    .or_else(|| upstream_tls.sni.clone())
+                    .unwrap_or_else(|| "localhost".to_string());
+                HeaderValue::from_str(&host).wrap_err_with(|| format!("invalid host '{host}'"))?;
+                let tls = upstream_tls.enabled.then(|| ProbeTls {
+                    sni: upstream_tls.sni.clone().unwrap_or_else(|| host.clone()),
+                    verify: upstream_tls.verify.unwrap_or(true),
+                });
+                HealthProbe::Http(HttpProbe {
+                    path,
+                    host,
+                    expected_status: self.expected_status.clone(),
+                    timeout: Duration::from_millis(self.timeout_ms.unwrap_or(1000)),
+                    port: self.port,
+                    tls,
+                })
+            }
+        };
+        Ok(HealthCheckOpt {
+            probe,
+            passes,
+            fails,
+        })
     }
 }
 
@@ -1248,6 +1359,71 @@ mod tests {
             "[server.real_ip]\ntrusted_proxies = []\n{MINIMAL_TOML}"
         ));
         assert!(errors_of(&config).contains("trusted_proxies is empty"));
+    }
+
+    /// The minimal config with `lb` added to its load_balancer table.
+    fn with_lb(lb: &str) -> Config {
+        toml(&MINIMAL_TOML.replace(
+            "[[proxy.router.load_balancer.upstreams]]",
+            &format!("{lb}\n[[proxy.router.load_balancer.upstreams]]"),
+        ))
+    }
+
+    #[test]
+    fn health_checks_are_parsed_with_upstream_tls() {
+        let config = with_lb(
+            "[proxy.router.load_balancer.health_check]\ntype = \"http\"\npath = \"/healthz?deep=1\"\n\
+             expected_status = [200, 204]\nfails = 3\n\
+             [proxy.router.upstream_tls]\nenabled = true\nsni = \"api.internal\"",
+        );
+        config.validate().unwrap();
+        let route = &config.proxy.router[0];
+        let opt = route.load_balancer.to_lb_opt(&route.upstream_tls).unwrap();
+        assert_eq!(
+            opt.health_check,
+            HealthCheckOpt {
+                probe: HealthProbe::Http(HttpProbe {
+                    path: "/healthz?deep=1".into(),
+                    host: "api.internal".into(),
+                    expected_status: vec![200, 204],
+                    timeout: Duration::from_secs(1),
+                    port: None,
+                    tls: Some(ProbeTls {
+                        sni: "api.internal".into(),
+                        verify: true,
+                    }),
+                }),
+                passes: 1,
+                fails: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn invalid_health_checks_are_reported() {
+        for (table, expected) in [
+            ("path = \"/x\"", "only applies to type = \"http\""),
+            ("type = \"http\"\npath = \"health\"", "absolute path"),
+            (
+                "type = \"http\"\nexpected_status = [99]",
+                "99 is not an HTTP status",
+            ),
+            ("type = \"http\"\ntimeout_ms = 0", "timeout_ms"),
+            ("fails = 0", "at least 1"),
+        ] {
+            let config = with_lb(&format!(
+                "[proxy.router.load_balancer.health_check]\n{table}"
+            ));
+            let err = errors_of(&config);
+            assert!(err.contains(expected), "{table}: {err}");
+        }
+        let config = toml(&MINIMAL_TOML.replace(
+            "[[proxy.router.load_balancer.upstreams]]",
+            "[proxy.router.load_balancer]\nhealth_check_interval_secs = 0\n\
+             health_check = { type = \"http\" }\n[[proxy.router.load_balancer.upstreams]]",
+        ));
+        let err = errors_of(&config);
+        assert!(err.contains("health_check_interval_secs is 0"), "{err}");
     }
 
     #[test]

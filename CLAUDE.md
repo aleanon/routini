@@ -128,7 +128,8 @@ LOG_JSON=1 cargo run
 - `Backend<M: Metrics = NoMetric>`: metrics are a monomorphized type parameter
 - Six strategies: RoundRobin, Random, FNVHash, Consistent (Ketama), FewestConnections,
   FastestServer (EWMA). `BackendSelection::iter(&'a self)` returns a borrowing GAT iterator
-- Static discovery (shared via `Arc<Static>` so reload can change backends), TCP health checks
+- Static discovery (shared via `Arc<Static>` so reload can change backends), TCP or HTTP
+  health checks (`HealthCheckOpt`; HTTP probes follow the route's `upstream_tls`)
 
 **Adaptive Load Balancer** (`routini/src/adaptive_loadbalancer/`)
 - `AdaptiveLoadBalancer<D: DecisionEngine>`; config and engine thresholds behind `ArcSwap`,
@@ -145,8 +146,8 @@ LOG_JSON=1 cargo run
 - `RouteManager` (one Pingora `BackgroundService`) owns every route and its background task
 - SIGHUP / `RouteManager::reload`: routes diffed by (host, regex, path) against the applied
   `RouteEntry`; upstreams swapped via discovery (kept backends keep metrics/health), LB tuning
-  and strategy applied live, `RouteState` swapped only if route settings changed, health
-  check on<->off rebuilds, routes added/removed
+  and strategy applied live, `RouteState` swapped only if route settings changed, a health
+  check added/removed/changed rebuilds, routes added/removed
 - `server`, `proxy.listener`, `proxy.tls` and changed cert files are reported as restart-required
 
 **TLS** (`routini/src/tls.rs`)

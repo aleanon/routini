@@ -26,6 +26,59 @@ pub struct AdaptiveLbOpt {
     pub hysteresis_exit_factor: f32,
     /// What the hash strategies (FNVHash, Consistent) hash to pick a backend.
     pub hash_key: HashKey,
+    /// How backends are probed, when `health_check_interval` is set.
+    pub health_check: HealthCheckOpt,
+}
+
+/// An active health check (nginx Plus `health_check`): how a backend is probed and how many
+/// results in a row flip its state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HealthCheckOpt {
+    pub probe: HealthProbe,
+    /// Successful probes in a row that bring an unhealthy backend back (nginx `passes`).
+    pub passes: usize,
+    /// Failed probes in a row that take a healthy backend out (nginx `fails`).
+    pub fails: usize,
+}
+
+impl Default for HealthCheckOpt {
+    fn default() -> Self {
+        Self {
+            probe: HealthProbe::Tcp,
+            passes: 1,
+            fails: 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum HealthProbe {
+    /// A backend is healthy if it accepts a TCP connection.
+    Tcp,
+    /// A backend is healthy if it answers a GET with an expected status.
+    Http(HttpProbe),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct HttpProbe {
+    /// Path and query to request.
+    pub path: String,
+    /// `Host` header (and SNI unless `tls.sni` is set).
+    pub host: String,
+    /// Statuses that count as healthy. Empty: any 2xx or 3xx.
+    pub expected_status: Vec<u16>,
+    /// Connect and read timeout.
+    pub timeout: Duration,
+    /// Probe this port instead of the backend's.
+    pub port: Option<u16>,
+    /// Probe over TLS. Follows the route's upstream TLS settings.
+    pub tls: Option<ProbeTls>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProbeTls {
+    pub sni: String,
+    pub verify: bool,
 }
 
 /// The part of a request the hash strategies select a backend with, so requests with the same
@@ -96,6 +149,7 @@ impl Default for AdaptiveLbOpt {
             min_nr_of_connections: DEFAULT_MIN_NR_OF_CONNECTIONS,
             hysteresis_exit_factor: DEFAULT_HYSTERESIS_EXIT_FACTOR,
             hash_key: HashKey::default(),
+            health_check: HealthCheckOpt::default(),
         }
     }
 }

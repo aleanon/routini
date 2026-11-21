@@ -38,6 +38,16 @@ health_check_interval_secs = 1
 # adaptive engine never switches away from it.
 # hash_key = "client_ip"
 
+# How backends are probed while health_check_interval_secs > 0. Default: a TCP connect.
+# HTTP probes use the route's upstream_tls (scheme, SNI, verification).
+# [proxy.router.load_balancer.health_check]
+# type = "http"
+# path = "/health"
+# expected_status = [200]   # default: any 2xx or 3xx
+# timeout_ms = 1000
+# passes = 1                # successes in a row to bring a backend back
+# fails = 1                 # failures in a row to take it out
+
 # Adaptive tuning, all optional (defaults shown in comments)
 [proxy.router.load_balancer.adaptive_lb_opt]
 # latency_smoothing_factor = 0.5
