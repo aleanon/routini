@@ -411,3 +411,137 @@ async fn idle_client_connections_are_closed_after_the_keepalive_timeout() {
     assert!(!exchange(&mut stream, "").await);
     assert!(closed_within(&mut stream, Duration::from_millis(500)).await);
 }
+
+/// A backend that reads each request header and then sends `response`, or, for `None`, never
+/// answers. Returns its address.
+async fn scripted_backend(response: Option<&'static str>) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut request = Vec::new();
+                let mut buf = [0; 1024];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut buf).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => request.extend_from_slice(&buf[..n]),
+                    }
+                }
+                match response {
+                    Some(response) => {
+                        let _ = stream.write_all(response.as_bytes()).await;
+                    }
+                    None => tokio::time::sleep(std::time::Duration::from_secs(30)).await,
+                }
+            });
+        }
+    });
+    address
+}
+
+const UNAVAILABLE: &str =
+    "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 4\r\nconnection: close\r\n\r\ndown";
+
+/// Statuses of `n` requests with `method` to `path`.
+async fn statuses(app: &ReloadApp, method: reqwest::Method, path: &str, n: usize) -> Vec<u16> {
+    let mut out = Vec::new();
+    for _ in 0..n {
+        let res = app
+            .client
+            .request(method.clone(), format!("{}{path}", app.base))
+            .send()
+            .await
+            .unwrap();
+        out.push(res.status().as_u16());
+    }
+    out
+}
+
+#[tokio::test]
+async fn configured_statuses_are_retried_on_another_backend() {
+    let b = TestApp::create_backends(1).await.unwrap();
+    let down = scripted_backend(Some(UNAVAILABLE)).await;
+    let ports = Ports::new();
+    let routes = route(
+        "/a/*",
+        &[&b[0], &down],
+        "[proxy.router.retry]\nretry_on_status = [503]",
+        "",
+    ) + &route("/plain/*", &[&b[0], &down], "", "");
+    let app = ReloadApp::start(config(&ports, "", &routes), None).await;
+
+    assert_eq!(
+        statuses(&app, reqwest::Method::GET, "/a/health", 10).await,
+        [200; 10]
+    );
+    // Without retry_on_status the 503 reaches the client
+    assert!(
+        statuses(&app, reqwest::Method::GET, "/plain/health", 10)
+            .await
+            .contains(&503)
+    );
+    // POST isn't resent after it reached a backend (the worker answers it 405)
+    let post = statuses(&app, reqwest::Method::POST, "/a/health", 10).await;
+    assert!(post.contains(&503), "{post:?}");
+}
+
+#[tokio::test]
+async fn timeouts_are_retried_on_another_backend() {
+    let b = TestApp::create_backends(1).await.unwrap();
+    let hangs = scripted_backend(None).await;
+    let ports = Ports::new();
+    let timeouts = "[proxy.router.timeouts]\nread_ms = 200";
+    let routes = route("/a/*", &[&b[0], &hangs], timeouts, "")
+        + &route(
+            "/off/*",
+            &[&b[0], &hangs],
+            &format!("{timeouts}\n[proxy.router.retry]\nretry_on_timeout = false"),
+            "",
+        );
+    let app = ReloadApp::start(config(&ports, "", &routes), None).await;
+
+    assert_eq!(
+        statuses(&app, reqwest::Method::GET, "/a/health", 6).await,
+        [200; 6]
+    );
+    let off = statuses(&app, reqwest::Method::GET, "/off/health", 6).await;
+    assert!(off.iter().any(|s| *s >= 500), "{off:?}");
+}
+
+/// Answers the first request on each connection (keeping it alive) and closes the connection
+/// when a second request arrives on it, like a backend whose keep-alive just expired.
+async fn one_request_per_connection_backend() -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buf = [0; 4096];
+                if stream.read(&mut buf).await.unwrap_or(0) == 0 {
+                    return;
+                }
+                let ok = "HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok";
+                let _ = stream.write_all(ok.as_bytes()).await;
+                // The next request on this connection: close without answering
+                let _ = stream.read(&mut buf).await;
+            });
+        }
+    });
+    address
+}
+
+#[tokio::test]
+async fn a_lone_backend_is_retried_when_its_pooled_connection_went_stale() {
+    // Every second request goes out on a pooled connection the backend then drops. The retry
+    // has to be allowed to go to the same, only, backend again.
+    let flaky = one_request_per_connection_backend().await;
+    let ports = Ports::new();
+    let app = ReloadApp::start(config(&ports, "", &route("/a/*", &[&flaky], "", "")), None).await;
+    assert_eq!(
+        statuses(&app, reqwest::Method::GET, "/a/x", 6).await,
+        [200; 6]
+    );
+}

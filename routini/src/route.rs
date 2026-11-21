@@ -28,12 +28,24 @@ use crate::{
 
 pub type SharedLb = Arc<AdaptiveLoadBalancer<AdaptiveDecisionEngine>>;
 
-/// Per-request failover behaviour (nginx `proxy_next_upstream` for connect errors).
-#[derive(Debug, Clone, Copy)]
+/// Per-request failover (nginx `proxy_next_upstream`). A retry goes to a backend not tried yet
+/// for this request when there is one.
+///
+/// A connect error is always safe to retry, the request never left. Anything else is only
+/// retried while nothing of the response has reached the client and the request body still fits
+/// the replay buffer (64 KiB), and, unless `retry_non_idempotent`, only for methods that can be
+/// repeated (not POST, PATCH or LOCK, as nginx).
+#[derive(Debug, Clone)]
 pub struct RetryConfig {
-    /// Maximum additional upstream attempts after the first, each on a different backend.
+    /// Maximum additional upstream attempts after the first.
     pub max_retries: usize,
     pub retry_on_connect_error: bool,
+    /// Retry when reading the response (or sending the request) times out.
+    pub retry_on_timeout: bool,
+    /// Retry when the backend answers with one of these statuses (e.g. 502, 503, 504).
+    pub retry_on_status: Vec<u16>,
+    /// Also retry POST, PATCH and LOCK after the request was sent.
+    pub retry_non_idempotent: bool,
 }
 
 impl Default for RetryConfig {
@@ -41,7 +53,17 @@ impl Default for RetryConfig {
         Self {
             max_retries: 1,
             retry_on_connect_error: true,
+            retry_on_timeout: true,
+            retry_on_status: Vec::new(),
+            retry_non_idempotent: false,
         }
+    }
+}
+
+impl RetryConfig {
+    /// Whether a request with `method` may be sent again after it reached a backend.
+    pub fn may_resend(&self, method: &http::Method) -> bool {
+        self.retry_non_idempotent || !matches!(method.as_str(), "POST" | "PATCH" | "LOCK")
     }
 }
 

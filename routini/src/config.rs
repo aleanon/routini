@@ -639,6 +639,16 @@ impl RouteEntry {
                 "{name}: rate_limit_burst and rate_limit_delay need rate_limit_rps"
             ));
         }
+        if let Some(code) = self
+            .retry
+            .retry_on_status
+            .iter()
+            .find(|c| !(400..=599).contains(*c))
+        {
+            errors.push(format!(
+                "{name}: retry.retry_on_status {code} is not an error status (400-599)"
+            ));
+        }
         if self.max_connections == Some(0) {
             errors.push(format!("{name}: max_connections must be greater than 0"));
         }
@@ -867,6 +877,13 @@ impl TimeoutsConfig {
 pub struct RetryConfigInput {
     pub max_retries: Option<usize>,
     pub retry_on_connect_error: Option<bool>,
+    /// Retry when the backend times out (default true; idempotent methods only).
+    pub retry_on_timeout: Option<bool>,
+    /// Retry when the backend answers with one of these statuses, e.g. [502, 503, 504].
+    #[serde(default)]
+    pub retry_on_status: Vec<u16>,
+    /// Also retry POST, PATCH and LOCK once they reached a backend (default false).
+    pub retry_non_idempotent: Option<bool>,
 }
 
 impl RetryConfigInput {
@@ -877,6 +894,13 @@ impl RetryConfigInput {
         }
         if let Some(on_connect) = self.retry_on_connect_error {
             retry.retry_on_connect_error = on_connect;
+        }
+        if let Some(on_timeout) = self.retry_on_timeout {
+            retry.retry_on_timeout = on_timeout;
+        }
+        retry.retry_on_status = self.retry_on_status.clone();
+        if let Some(non_idempotent) = self.retry_non_idempotent {
+            retry.retry_non_idempotent = non_idempotent;
         }
         retry
     }

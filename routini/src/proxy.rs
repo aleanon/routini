@@ -869,6 +869,20 @@ impl ProxyHttp for Proxy {
             );
             lb.select_excluding(key, &ctx.tried)
         };
+        // All backends tried (e.g. a single one whose pooled connection had gone stale): retry on
+        // any healthy one rather than failing a request that may well succeed
+        let backend = backend.or_else(|| {
+            let mut ip_buf = [0; 16];
+            let key = hash_key(
+                &lb.config().hash_key,
+                session.req_header(),
+                ctx.client_ip,
+                &mut ip_buf,
+            );
+            (!ctx.tried.is_empty())
+                .then(|| lb.select_excluding(key, &[]))
+                .flatten()
+        });
         let backend = backend.ok_or(Error {
             context: Some(ImmutStr::Static("No healthy backends available")),
             cause: None,
@@ -958,11 +972,33 @@ impl ProxyHttp for Proxy {
 
     async fn upstream_response_filter(
         &self,
-        _session: &mut Session,
-        _upstream_response: &mut ResponseHeader,
+        session: &mut Session,
+        upstream_response: &mut ResponseHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
         if let (Some(route), Some(state), Some(backend)) = (&ctx.route, &ctx.state, &ctx.backend) {
+            // A status the route retries on: fail this attempt before anything reaches the
+            // client, so the request goes to the next backend (nginx `proxy_next_upstream
+            // http_503`). The last allowed attempt's response is passed on as it is.
+            let status = upstream_response.status.as_u16();
+            let retry = &state.config.retry;
+            if retry.retry_on_status.contains(&status)
+                && ctx.tried.len() <= retry.max_retries
+                && retry.may_resend(&session.req_header().method)
+                && !session.as_ref().retry_buffer_truncated()
+            {
+                if state.health.record_failure(backend) {
+                    route.runtime.lb.set_backend_enabled(backend, false);
+                    log::warn!("Passively ejected backend {}", backend.addr);
+                }
+                let mut e = Error::explain(
+                    ErrorType::HTTPStatus(status),
+                    "upstream status configured for retry",
+                );
+                e.set_retry(true);
+                return Err(e);
+            }
+
             // A response means the connection succeeded: clear the passive-health failure window.
             state.health.record_success(backend);
 
@@ -994,8 +1030,52 @@ impl ProxyHttp for Proxy {
                 }
             }
 
-            let retry = state.config.retry;
+            let retry = &state.config.retry;
             if retry.retry_on_connect_error && ctx.tried.len() <= retry.max_retries {
+                e.set_retry(true);
+            }
+        }
+        e
+    }
+
+    /// An error after the request reached a backend. Pingora retries a failure on a reused
+    /// (possibly stale) pooled connection; a timeout is retried too when the route allows it, see
+    /// [RetryConfig]. Nothing is retried once the client has seen part of the response.
+    fn error_while_proxy(
+        &self,
+        peer: &HttpPeer,
+        session: &mut Session,
+        e: Box<Error>,
+        ctx: &mut Self::CTX,
+        client_reused: bool,
+    ) -> Box<Error> {
+        let mut e = e.more_context(format!("Peer: {peer}"));
+        let replayable =
+            session.response_written().is_none() && !session.as_ref().retry_buffer_truncated();
+        if !replayable {
+            e.set_retry(false);
+            return e;
+        }
+        // Retries set by upstream_response_filter (status) stand; a stale pooled connection is
+        // retried as pingora does
+        e.retry.decide_reuse(client_reused);
+
+        let timed_out = matches!(
+            e.etype(),
+            ErrorType::ReadTimedout | ErrorType::WriteTimedout
+        );
+        if let (true, Some(route), Some(state)) = (timed_out, &ctx.route, &ctx.state) {
+            if let Some(backend) = &ctx.backend {
+                if state.health.record_failure(backend) {
+                    route.runtime.lb.set_backend_enabled(backend, false);
+                    log::warn!("Passively ejected backend {}", backend.addr);
+                }
+            }
+            let retry = &state.config.retry;
+            if retry.retry_on_timeout
+                && ctx.tried.len() <= retry.max_retries
+                && retry.may_resend(&session.req_header().method)
+            {
                 e.set_retry(true);
             }
         }
