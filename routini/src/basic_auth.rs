@@ -37,6 +37,9 @@ pub struct BasicAuth {
     users: Arc<HashMap<String, Secret>>,
     /// `Authorization` values whose bcrypt check passed.
     verified: Arc<Cache<String, ()>>,
+    /// A hash at the highest cost in use, checked for unknown users so they take as long to
+    /// reject as a wrong password: response times don't reveal which users exist.
+    dummy_hash: Option<Arc<str>>,
 }
 
 impl Default for BasicAuth {
@@ -44,6 +47,7 @@ impl Default for BasicAuth {
         Self {
             users: Arc::default(),
             verified: Arc::new(Cache::new(VERIFIED_CAPACITY)),
+            dummy_hash: None,
         }
     }
 }
@@ -91,8 +95,25 @@ impl BasicAuth {
                 return Err(format!("basic_auth user '{user}' is listed twice"));
             }
         }
+        let max_cost = users
+            .values()
+            .filter_map(|secret| match secret {
+                Secret::Bcrypt(hash) => hash.parse::<bcrypt::HashParts>().ok(),
+                Secret::Plain(_) => None,
+            })
+            .map(|parts| parts.get_cost())
+            .max();
+        let dummy_hash = match max_cost {
+            Some(cost) => Some(
+                bcrypt::hash("routini-unknown-user", cost)
+                    .map_err(|err| format!("basic_auth: {err}"))?
+                    .into(),
+            ),
+            None => None,
+        };
         Ok(Self {
             users: Arc::new(users),
+            dummy_hash,
             ..Default::default()
         })
     }
@@ -124,20 +145,17 @@ impl BasicAuth {
             return false;
         };
         match self.users.get(user) {
-            None => false,
+            None => {
+                if let Some(dummy) = &self.dummy_hash {
+                    bcrypt_check(password, dummy).await;
+                }
+                false
+            }
             Some(Secret::Plain(expected)) => {
                 constant_time_eq(expected.as_bytes(), password.as_bytes())
             }
             Some(Secret::Bcrypt(hash)) => {
-                let Ok(_permit) = BCRYPT_PERMITS.acquire().await else {
-                    return false;
-                };
-                let (password, hash) = (password.to_string(), hash.clone());
-                let ok = tokio::task::spawn_blocking(move || {
-                    bcrypt::verify(password, &hash).unwrap_or(false)
-                })
-                .await
-                .unwrap_or(false);
+                let ok = bcrypt_check(password, hash).await;
                 if ok {
                     self.verified.insert(token.to_string(), ());
                 }
@@ -145,6 +163,17 @@ impl BasicAuth {
             }
         }
     }
+}
+
+/// Check `password` against a bcrypt `hash` on the blocking pool, at most one per CPU at a time.
+async fn bcrypt_check(password: &str, hash: &str) -> bool {
+    let Ok(_permit) = BCRYPT_PERMITS.acquire().await else {
+        return false;
+    };
+    let (password, hash) = (password.to_string(), hash.to_string());
+    tokio::task::spawn_blocking(move || bcrypt::verify(password, &hash).unwrap_or(false))
+        .await
+        .unwrap_or(false)
 }
 
 /// Compare without exiting at the first differing byte, so response timing doesn't reveal how
@@ -197,6 +226,36 @@ mod tests {
         .unwrap();
         assert!(auth.verify(Some(&header("user:pass"))).await);
         assert!(!auth.verify(Some(&header("user:nope"))).await);
+    }
+
+    #[tokio::test]
+    async fn unknown_users_take_as_long_as_wrong_passwords() {
+        let hash = bcrypt::hash("s3cret", 8).unwrap();
+        let auth = BasicAuth::new(&[format!("bob:{hash}"), "alice:plain".into()]).unwrap();
+        assert!(auth.dummy_hash.is_some());
+        let time = |credentials: &'static str| {
+            let auth = auth.clone();
+            async move {
+                let start = std::time::Instant::now();
+                assert!(!auth.verify(Some(&header(credentials))).await);
+                start.elapsed()
+            }
+        };
+        let wrong_password = time("bob:wrong").await;
+        let unknown_user = time("mallory:wrong").await;
+        // Both pay for a cost-8 bcrypt check (several ms); without the dummy check the unknown
+        // user returned in microseconds
+        assert!(
+            unknown_user * 3 > wrong_password,
+            "unknown {unknown_user:?} vs wrong password {wrong_password:?}"
+        );
+        // Plain-only configs have nothing to hide behind a hash
+        assert!(
+            BasicAuth::new(&["a:b".into()])
+                .unwrap()
+                .dummy_hash
+                .is_none()
+        );
     }
 
     #[test]
