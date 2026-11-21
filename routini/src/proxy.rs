@@ -1060,10 +1060,13 @@ impl ProxyHttp for Proxy {
         // retried as pingora does
         e.retry.decide_reuse(client_reused);
 
-        let timed_out = matches!(
-            e.etype(),
-            ErrorType::ReadTimedout | ErrorType::WriteTimedout
-        );
+        // Only the backend's timeouts: a slow client (e.g. the client body timeout) is not the
+        // backend's failure and must not get it ejected or the request resent
+        let timed_out = *e.esource() == ErrorSource::Upstream
+            && matches!(
+                e.etype(),
+                ErrorType::ReadTimedout | ErrorType::WriteTimedout
+            );
         if let (true, Some(route), Some(state)) = (timed_out, &ctx.route, &ctx.state) {
             if let Some(backend) = &ctx.backend {
                 if state.health.record_failure(backend) {

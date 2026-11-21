@@ -52,6 +52,12 @@ async fn forwarded_headers(headers: HeaderMap) -> String {
     )
 }
 
+/// Reads the whole request body and answers with its length, for tests that need a backend
+/// waiting on the body.
+async fn echo(body: axum::body::Bytes) -> String {
+    body.len().to_string()
+}
+
 async fn work(State(address): State<String>) -> StatusCode {
     println!("Work done on {}", address);
     tokio::time::sleep(Duration::from_millis(10)).await;
@@ -86,6 +92,7 @@ impl Worker {
             .route("/work", get(work))
             .route("/headers", get(forwarded_headers))
             .route("/keep-alive", get(keep_alive))
+            .route("/echo", axum::routing::post(echo))
             .with_state(address.clone());
 
         println!("Worker listening on {}", address);

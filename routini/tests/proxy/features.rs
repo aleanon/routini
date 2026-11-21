@@ -558,3 +558,41 @@ async fn upstreams_can_be_hostnames() {
     let (status, body) = app.get("/a/health").await;
     assert_eq!((status, body), (StatusCode::OK, b[0].clone()));
 }
+
+#[tokio::test]
+async fn a_slow_client_does_not_get_the_backend_ejected() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let b = TestApp::create_backends(1).await.unwrap();
+    let ports = Ports::new();
+    // Ejects the only backend on its first failure, if the timeout were counted against it
+    let routes = route(
+        "/a/*",
+        &[&b[0]],
+        "[proxy.router.passive_health]\nenabled = true\nmax_fails = 1\nfail_timeout_secs = 60",
+        "",
+    );
+    let app = ReloadApp::start(
+        config(&ports, "client_body_timeout_secs = 1", &routes),
+        None,
+    )
+    .await;
+
+    // Announce a body and stall after two bytes, until the client body timeout fires
+    let mut stream = tokio::net::TcpStream::connect(app.base.trim_start_matches("http://"))
+        .await
+        .unwrap();
+    stream
+        .write_all(b"POST /a/echo HTTP/1.1\r\nHost: test\r\nContent-Length: 100\r\n\r\nab")
+        .await
+        .unwrap();
+    let mut buf = [0; 1024];
+    let start = std::time::Instant::now();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(4), stream.read(&mut buf)).await;
+    assert!(
+        start.elapsed() >= std::time::Duration::from_millis(900),
+        "the backend should have waited for the body until the timeout"
+    );
+
+    let (status, body) = app.get("/a/health").await;
+    assert_eq!((status, body), (StatusCode::OK, b[0].clone()));
+}
