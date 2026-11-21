@@ -346,11 +346,15 @@ const X_REAL_IP: HeaderName = HeaderName::from_static("x-real-ip");
 impl HeaderRules {
     /// Apply request-header rules to the outgoing upstream request.
     ///
-    /// `client_ip`/`client_tls` describe the downstream connection and drive the forwarded headers.
+    /// `client_ip` is the client (behind trusted proxies, see [crate::real_ip]), `peer_ip` the
+    /// address that connected to us and `client_tls` whether that connection is TLS. They drive
+    /// the forwarded headers: `X-Real-IP` is the client; `X-Forwarded-For` is the client alone,
+    /// or with [Self::trusted_proxy] the incoming chain plus the peer.
     pub fn apply_request(
         &self,
         upstream: &mut RequestHeader,
         client_ip: Option<IpAddr>,
+        peer_ip: Option<IpAddr>,
         client_tls: bool,
     ) {
         if let HostRewrite::Set(value) = &self.host {
@@ -360,24 +364,44 @@ impl HeaderRules {
         }
 
         if self.forwarded {
-            if let Some(ip) = client_ip {
-                let ip_str = ip.to_string();
-                let _ = upstream.insert_header(X_REAL_IP, &ip_str);
+            // Always overwritten or removed, so the client's own values never reach the
+            // backend, also when the client address is unknown (e.g. a unix socket peer)
+            let proto = if client_tls { "https" } else { "http" };
+            let _ = upstream.insert_header(X_FORWARDED_PROTO, proto);
 
-                let xff = if self.trusted_proxy {
-                    match upstream.headers.get(&X_FORWARDED_FOR) {
-                        Some(existing) => {
-                            format!("{}, {ip_str}", existing.to_str().unwrap_or_default())
-                        }
-                        None => ip_str.clone(),
-                    }
-                } else {
-                    ip_str
-                };
-                let _ = upstream.insert_header(X_FORWARDED_FOR, &xff);
-
-                let proto = if client_tls { "https" } else { "http" };
-                let _ = upstream.insert_header(X_FORWARDED_PROTO, proto);
+            let xff = match (self.trusted_proxy, peer_ip) {
+                (true, Some(peer)) => {
+                    // Several header lines are one list
+                    let existing = upstream
+                        .headers
+                        .get_all(&X_FORWARDED_FOR)
+                        .iter()
+                        .filter_map(|v| v.to_str().ok())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    Some(if existing.is_empty() {
+                        peer.to_string()
+                    } else {
+                        format!("{existing}, {peer}")
+                    })
+                }
+                _ => client_ip.map(|ip| ip.to_string()),
+            };
+            match xff {
+                Some(xff) => {
+                    let _ = upstream.insert_header(X_FORWARDED_FOR, xff);
+                }
+                None => {
+                    upstream.remove_header(&X_FORWARDED_FOR);
+                }
+            }
+            match client_ip {
+                Some(ip) => {
+                    let _ = upstream.insert_header(X_REAL_IP, ip.to_string());
+                }
+                None => {
+                    upstream.remove_header(&X_REAL_IP);
+                }
             }
         }
 
@@ -504,7 +528,12 @@ mod tests {
     fn forwarded_headers_set_for_direct_client() {
         let rules = HeaderRules::default();
         let mut r = req();
-        rules.apply_request(&mut r, Some("203.0.113.5".parse().unwrap()), true);
+        rules.apply_request(
+            &mut r,
+            Some("203.0.113.5".parse().unwrap()),
+            Some("203.0.113.5".parse().unwrap()),
+            true,
+        );
 
         assert_eq!(r.headers.get(&X_REAL_IP).unwrap(), "203.0.113.5");
         assert_eq!(r.headers.get(&X_FORWARDED_FOR).unwrap(), "203.0.113.5");
@@ -516,7 +545,12 @@ mod tests {
         let rules = HeaderRules::default(); // trusted_proxy = false
         let mut r = req();
         r.insert_header(X_FORWARDED_FOR, "1.2.3.4").unwrap();
-        rules.apply_request(&mut r, Some("203.0.113.5".parse().unwrap()), false);
+        rules.apply_request(
+            &mut r,
+            Some("203.0.113.5".parse().unwrap()),
+            Some("203.0.113.5".parse().unwrap()),
+            false,
+        );
 
         // spoofed upstream value is discarded, only the real client IP remains
         assert_eq!(r.headers.get(&X_FORWARDED_FOR).unwrap(), "203.0.113.5");
@@ -531,12 +565,55 @@ mod tests {
         };
         let mut r = req();
         r.insert_header(X_FORWARDED_FOR, "1.2.3.4").unwrap();
-        rules.apply_request(&mut r, Some("203.0.113.5".parse().unwrap()), false);
+        rules.apply_request(
+            &mut r,
+            Some("203.0.113.5".parse().unwrap()),
+            Some("203.0.113.5".parse().unwrap()),
+            false,
+        );
 
         assert_eq!(
             r.headers.get(&X_FORWARDED_FOR).unwrap(),
             "1.2.3.4, 203.0.113.5"
         );
+    }
+
+    #[test]
+    fn real_client_behind_a_proxy() {
+        let (client, peer) = ("198.51.100.1".parse().ok(), "10.0.0.1".parse().ok());
+
+        // The chain the proxy sent plus the proxy itself
+        let trusted = HeaderRules {
+            trusted_proxy: true,
+            ..Default::default()
+        };
+        let mut r = req();
+        r.append_header(X_FORWARDED_FOR, "198.51.100.1").unwrap();
+        r.append_header(X_FORWARDED_FOR, "10.0.0.2").unwrap();
+        trusted.apply_request(&mut r, client, peer, false);
+        assert_eq!(r.headers.get(&X_REAL_IP).unwrap(), "198.51.100.1");
+        assert_eq!(
+            r.headers.get(&X_FORWARDED_FOR).unwrap(),
+            "198.51.100.1, 10.0.0.2, 10.0.0.1"
+        );
+
+        // Only the client
+        let mut r = req();
+        r.insert_header(X_FORWARDED_FOR, "198.51.100.1").unwrap();
+        HeaderRules::default().apply_request(&mut r, client, peer, false);
+        assert_eq!(r.headers.get(&X_FORWARDED_FOR).unwrap(), "198.51.100.1");
+    }
+
+    #[test]
+    fn unknown_client_never_passes_its_forwarded_headers_through() {
+        let mut r = req();
+        r.insert_header(X_FORWARDED_FOR, "6.6.6.6").unwrap();
+        r.insert_header(X_REAL_IP, "6.6.6.6").unwrap();
+        r.insert_header(X_FORWARDED_PROTO, "https").unwrap();
+        HeaderRules::default().apply_request(&mut r, None, None, false);
+        assert!(r.headers.get(&X_FORWARDED_FOR).is_none());
+        assert!(r.headers.get(&X_REAL_IP).is_none());
+        assert_eq!(r.headers.get(&X_FORWARDED_PROTO).unwrap(), "http");
     }
 
     #[test]
@@ -553,7 +630,7 @@ mod tests {
         };
         let mut r = req();
         r.insert_header(http::header::COOKIE, "secret").unwrap();
-        rules.apply_request(&mut r, None, false);
+        rules.apply_request(&mut r, None, None, false);
 
         assert_eq!(
             r.headers.get(http::header::HOST).unwrap(),

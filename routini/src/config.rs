@@ -19,6 +19,7 @@ use serde::Deserialize;
 use crate::{
     adaptive_loadbalancer::options::AdaptiveLbOpt,
     load_balancing::strategy::Adaptive,
+    real_ip::RealIp,
     route::{
         AccessControl, CacheConfig, HeaderRules, HostRewrite, PassiveHealthConfig, RetryConfig,
         RouteAction, RouteConfig, TimeoutConfig, UpstreamTls,
@@ -192,6 +193,17 @@ impl Config {
                 upgrade_sock.len()
             ));
         }
+        if let Some(real_ip) = &self.server.real_ip {
+            if real_ip.trusted_proxies.is_empty() {
+                errors.push(
+                    "server.real_ip.trusted_proxies is empty, no proxy would be believed"
+                        .to_string(),
+                );
+            }
+            if let Err(err) = real_ip.to_real_ip() {
+                errors.push(format!("server.real_ip: {err}"));
+            }
+        }
         if self.server.worker_threads == Some(0) {
             errors.push("server.worker_threads must be greater than 0".to_string());
         }
@@ -284,6 +296,9 @@ impl Config {
         if !server.error_pages.is_empty() {
             builder = builder.error_pages(server.error_pages.clone());
         }
+        if let Some(real_ip) = &server.real_ip {
+            builder = builder.real_ip(real_ip.to_real_ip()?);
+        }
         if let Some(tls) = &self.proxy.tls {
             builder = builder.tls(tls.to_builder_tls());
         }
@@ -372,6 +387,33 @@ pub struct ServerConfig {
     /// Unix socket the listening sockets are handed over on during `--upgrade`; the old and new
     /// process must use the same path. Default and restrictions as for `pid_file`.
     pub upgrade_sock: Option<String>,
+    /// Take the client address from a header set by trusted proxies (nginx `real_ip`).
+    pub real_ip: Option<RealIpInput>,
+}
+
+/// nginx `set_real_ip_from` / `real_ip_header` / `real_ip_recursive on`, see [RealIp].
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RealIpInput {
+    /// Addresses or CIDR networks of the proxies in front of routini.
+    pub trusted_proxies: Vec<String>,
+    /// Header the proxies put the client address in. Default `X-Forwarded-For`.
+    #[serde(default = "default_real_ip_header")]
+    pub header: String,
+}
+
+fn default_real_ip_header() -> String {
+    "X-Forwarded-For".to_string()
+}
+
+impl RealIpInput {
+    pub fn to_real_ip(&self) -> Result<RealIp> {
+        Ok(RealIp {
+            trusted: parse_nets(&self.trusted_proxies)?,
+            header: HeaderName::from_bytes(self.header.as_bytes())
+                .wrap_err_with(|| format!("Invalid header name '{}'", self.header))?,
+        })
+    }
 }
 
 impl ServerConfig {
@@ -1178,6 +1220,29 @@ mod tests {
         let tls = config.proxy.tls.unwrap();
         assert_eq!(tls.cert_path, "/etc/routini/certs/c.pem");
         assert_eq!(tls.key_path, "/abs/k.pem");
+    }
+
+    #[test]
+    fn real_ip_is_parsed_and_validated() {
+        let config = toml(&format!(
+            "[server.real_ip]\ntrusted_proxies = [\"10.0.0.0/8\", \"127.0.0.1\"]\n{MINIMAL_TOML}"
+        ));
+        config.validate().unwrap();
+        let real_ip = config.server.real_ip.unwrap().to_real_ip().unwrap();
+        assert_eq!(real_ip.header, "x-forwarded-for");
+        assert_eq!(real_ip.trusted.len(), 2);
+
+        let config = toml(&format!(
+            "[server.real_ip]\ntrusted_proxies = [\"10.0.0.300\"]\nheader = \"bad header\"\n\
+             {MINIMAL_TOML}"
+        ));
+        let err = errors_of(&config);
+        assert!(err.contains("10.0.0.300"), "{err}");
+
+        let config = toml(&format!(
+            "[server.real_ip]\ntrusted_proxies = []\n{MINIMAL_TOML}"
+        ));
+        assert!(errors_of(&config).contains("trusted_proxies is empty"));
     }
 
     #[test]

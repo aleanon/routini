@@ -6,6 +6,11 @@
 [server]
 prometheus_address = "0.0.0.0:9000"
 
+# Behind a load balancer or CDN: believe the client address it forwards (nginx real_ip).
+# Rate/connection limits, allow/deny, hash keys and the access log then see the client, not
+# the proxy. The header is read right to left, skipping trusted addresses.
+# real_ip = { trusted_proxies = ["10.0.0.0/8", "127.0.0.1"], header = "X-Forwarded-For" }
+
 [proxy]
 # A port (bound on all interfaces) or "host:port". Env override: SERVER_ADDRESS
 listener = 3500

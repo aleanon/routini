@@ -28,6 +28,7 @@ use crate::{
         discovery::Static,
         strategy::{Adaptive, adaptive::AdaptiveStrategyMetrics},
     },
+    real_ip::RealIp,
     reload::RouteManager,
     utils::constants::{
         DEFAULT_GRACE_PERIOD, DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT, DEFAULT_WILDCARD_IDENTIFIER,
@@ -79,6 +80,7 @@ impl ServerBuilder {
             applied_config: None,
             request_id: false,
             error_pages: HashMap::new(),
+            real_ip: None,
             upgrade: false,
             pid_file: None,
             upgrade_sock: None,
@@ -244,6 +246,7 @@ pub struct ServerBuilder {
     applied_config: Option<Config>,
     request_id: bool,
     error_pages: HashMap<u16, String>,
+    real_ip: Option<RealIp>,
     upgrade: bool,
     pid_file: Option<String>,
     upgrade_sock: Option<String>,
@@ -337,6 +340,14 @@ impl ServerBuilder {
         self
     }
 
+    /// Take the client address from a header when the peer is a trusted proxy (nginx
+    /// `real_ip`). Rate/connection limits, allow/deny, hashing and the access log then see the
+    /// client instead of the proxy.
+    pub fn real_ip(mut self, real_ip: RealIp) -> Self {
+        self.real_ip = Some(real_ip);
+        self
+    }
+
     pub fn build(self) -> Server {
         self.build_with_reload_handle().0
     }
@@ -400,6 +411,7 @@ impl ServerBuilder {
         router.set_compression_level(self.compression_level);
         router.set_request_id(self.request_id);
         router.set_error_pages(self.error_pages);
+        router.set_real_ip(self.real_ip);
 
         let mut manager_service = background_service("route-manager", manager);
         manager_service.threads = Some(2);

@@ -121,6 +121,8 @@ LOG_JSON=1 cargo run
   an `ArcSwap`; config reload replaces it whole, so caches never outlive their config
 - Filters implement the route features; latency/connection metrics recorded per backend
 - `https_redirect`: plain listener answers 308 to the TLS listener's port
+- Client IP resolved once per request into `ctx.client_ip` (`real_ip.rs`: trusted proxies,
+  header read right to left); every per-client feature reads it, never the socket address
 
 **Load Balancing System** (`routini/src/load_balancing/`)
 - `Backend<M: Metrics = NoMetric>`: metrics are a monomorphized type parameter

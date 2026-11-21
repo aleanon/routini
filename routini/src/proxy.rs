@@ -30,6 +30,7 @@ use std::collections::HashMap;
 use crate::{
     adaptive_loadbalancer::AdaptiveBackend,
     load_balancing::Metrics,
+    real_ip::RealIp,
     route::{RouteAction, RouteRuntime, RouteState},
     utils::constants::{DEFAULT_PATH_CACHE_CAPACITY, DEFAULT_PATH_REMAINDER_IDENTIFIER},
 };
@@ -51,10 +52,11 @@ pub struct CachedRoute {
     pub stripped_path: Option<Box<[u8]>>,
 }
 
-/// Extract the client IP from the downstream session, if it is an inet socket.
+/// The IP of the downstream peer (the client, or a proxy in front of us), if it is an inet
+/// socket. See [RealIp] for the client behind trusted proxies.
 fn client_ip(session: &Session) -> Option<IpAddr> {
     match session.client_addr()? {
-        SocketAddr::Inet(addr) => Some(addr.ip()),
+        SocketAddr::Inet(addr) => Some(addr.ip().to_canonical()),
         _ => None,
     }
 }
@@ -187,6 +189,8 @@ pub struct Proxy {
     request_id: bool,
     /// Custom error-page bodies keyed by status code (nginx `error_page`).
     error_pages: Arc<HashMap<u16, String>>,
+    /// Where to find the client address behind trusted proxies. `None`: the peer address.
+    real_ip: Option<Arc<RealIp>>,
 }
 
 /// Map a fatal proxy error to the HTTP status to return (0 = downstream gone, do not respond).
@@ -250,7 +254,13 @@ impl Proxy {
             compression_level: 0,
             request_id: false,
             error_pages: Arc::new(HashMap::new()),
+            real_ip: None,
         }
+    }
+
+    /// Take the client address from a header when the peer is a trusted proxy.
+    pub fn set_real_ip(&mut self, real_ip: Option<RealIp>) {
+        self.real_ip = real_ip.map(Arc::new);
     }
 
     /// Atomically swap the routing table. Requests already routed keep their resolved route.
@@ -418,6 +428,8 @@ pub struct ConnectionCTX {
     conn_guard: Option<pingora_limits::inflight::Guard>,
     /// The request's `X-Request-Id` (incoming or generated) for upstream/response/log propagation.
     request_id: Option<String>,
+    /// The client address (behind trusted proxies, see [RealIp]), resolved in `request_filter`.
+    client_ip: Option<IpAddr>,
 }
 
 #[async_trait::async_trait]
@@ -436,6 +448,7 @@ impl ProxyHttp for Proxy {
             orig_path: None,
             conn_guard: None,
             request_id: None,
+            client_ip: None,
         }
     }
 
@@ -452,6 +465,25 @@ impl ProxyHttp for Proxy {
     /// short-circuit responses (redirects, limits) have a place to live. A path with no matching
     /// route is answered with 404 here rather than failing later in `upstream_peer`.
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
+        // The client: the peer, or the address a trusted proxy forwarded
+        let peer = client_ip(session);
+        ctx.client_ip = match (&self.real_ip, peer) {
+            (Some(real_ip), Some(peer)) => {
+                match real_ip.resolve(peer, &session.req_header().headers) {
+                    Some(client) => Some(client),
+                    None => {
+                        // A trusted proxy sent a chain that can't be read. Guessing the client
+                        // would let it pass IP rules or share the proxy's own rate limit
+                        // bucket, which its health checks depend on
+                        self.write_status(session, StatusCode::BAD_REQUEST.as_u16())
+                            .await?;
+                        return Ok(true);
+                    }
+                }
+            }
+            _ => peer,
+        };
+
         // Redirect plain-HTTP requests to HTTPS before any routing work.
         if self.https_redirect && !client_is_tls(session) {
             let location = {
@@ -518,14 +550,14 @@ impl ProxyHttp for Proxy {
 
         // Access control: IP allow/deny then HTTP Basic auth.
         if let Some(access) = &state.config.access {
-            if let Some(ip) = client_ip(session) {
+            if let Some(ip) = ctx.client_ip {
                 if !access.ip_allowed(ip) {
                     self.write_status(session, StatusCode::FORBIDDEN.as_u16())
                         .await?;
                     return Ok(true);
                 }
-            } else if !access.allow.is_empty() {
-                // An allow-list is set but we cannot determine the client IP: deny.
+            } else if !access.allow.is_empty() || !access.deny.is_empty() {
+                // IP rules are set but the client address is unknown: deny rather than guess.
                 self.write_status(session, StatusCode::FORBIDDEN.as_u16())
                     .await?;
                 return Ok(true);
@@ -584,7 +616,7 @@ impl ProxyHttp for Proxy {
         }
 
         // Per-client-IP rate and concurrency limits (nginx limit_req / limit_conn).
-        let client = client_ip(session);
+        let client = ctx.client_ip;
         if let (Some(limiter), Some(ip)) = (&state.rate_limiter, client) {
             if limiter.over_limit(&ip) {
                 self.write_status(session, StatusCode::TOO_MANY_REQUESTS.as_u16())
@@ -777,12 +809,12 @@ impl ProxyHttp for Proxy {
         ctx.upstream_start = Some(Instant::now());
 
         if let Some(state) = &ctx.state {
-            let ip = client_ip(session);
+            let peer = client_ip(session);
             let tls = client_is_tls(session);
             state
                 .config
                 .headers
-                .apply_request(upstream_request, ip, tls);
+                .apply_request(upstream_request, ctx.client_ip, peer, tls);
         }
         if let Some(id) = &ctx.request_id {
             let _ = upstream_request.insert_header(X_REQUEST_ID, id);
@@ -943,7 +975,10 @@ impl ProxyHttp for Proxy {
         let latency_ms = ctx.request_start.elapsed().as_millis();
         let bytes_sent = session.body_bytes_sent();
         let method = session.req_header().method.clone();
-        let client = client_ip(session)
+        // Requests answered before the client was resolved log the peer
+        let client = ctx
+            .client_ip
+            .or_else(|| client_ip(session))
             .map(|ip| ip.to_string())
             .unwrap_or_default();
         let upstream = ctx
