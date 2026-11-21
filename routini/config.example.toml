@@ -22,6 +22,13 @@ strip_prefix = true
 # Access control, all optional (nginx allow/deny/auth_basic). Users are "user:<bcrypt hash>"
 # as `htpasswd -nB user` prints it (preferred, the password stays out of this file) or
 # "user:password".
+# Per-client rate limit (nginx limit_req): a sustained rate, plus a burst that may arrive at
+# once (default: one second's worth). Over the burst: 429. rate_limit_delay = true holds
+# burst requests until their slot instead of passing them at once (nginx without nodelay).
+# rate_limit_rps = 10
+# rate_limit_burst = 20
+# rate_limit_delay = false
+
 # [proxy.router.access]
 # allow = ["10.0.0.0/8"]
 # deny = ["10.1.2.3"]

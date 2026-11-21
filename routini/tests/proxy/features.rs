@@ -261,3 +261,69 @@ async fn http_health_check_takes_out_backends_tcp_would_keep() {
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
     assert_eq!(statuses(&app).await, 20);
 }
+
+#[tokio::test]
+async fn rate_limit_allows_a_burst_per_client_then_rejects_or_delays() {
+    let b = TestApp::create_backends(1).await.unwrap();
+    let ports = Ports::new();
+    let routes = route(
+        "/a/*",
+        &[&b[0]],
+        "rate_limit_rps = 1\nrate_limit_burst = 2",
+        "",
+    ) + &route(
+        "/d/*",
+        &[&b[0]],
+        "rate_limit_rps = 10\nrate_limit_burst = 2\nrate_limit_delay = true",
+        "",
+    );
+    let app = ReloadApp::start(
+        config(
+            &ports,
+            "real_ip = { trusted_proxies = [\"127.0.0.1\"] }",
+            &routes,
+        ),
+        None,
+    )
+    .await;
+    let get = |path: &str, client: &str| {
+        app.client
+            .get(format!("{}{path}", app.base))
+            .header("x-forwarded-for", client.to_string())
+            .send()
+    };
+
+    // nodelay: the burst (1 + 2) passes, the next is rejected; another client is unaffected
+    for _ in 0..3 {
+        assert_eq!(
+            get("/a/health", "203.0.113.1").await.unwrap().status(),
+            StatusCode::OK
+        );
+    }
+    assert_eq!(
+        get("/a/health", "203.0.113.1").await.unwrap().status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        get("/a/health", "203.0.113.2").await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    // delay: the burst is held back to 10/s instead of passing at once
+    let start = std::time::Instant::now();
+    for _ in 0..3 {
+        assert_eq!(
+            get("/d/health", "203.0.113.3").await.unwrap().status(),
+            StatusCode::OK
+        );
+    }
+    assert!(
+        start.elapsed() >= std::time::Duration::from_millis(190),
+        "{:?}",
+        start.elapsed()
+    );
+    assert_eq!(
+        get("/d/health", "203.0.113.4").await.unwrap().status(),
+        StatusCode::OK
+    );
+}

@@ -21,6 +21,7 @@ use crate::{
     },
     basic_auth::BasicAuth,
     load_balancing::strategy::Adaptive,
+    rate_limit::RateLimit,
     real_ip::RealIp,
     route::{
         AccessControl, CacheConfig, HeaderRules, HostRewrite, PassiveHealthConfig, RetryConfig,
@@ -513,8 +514,14 @@ pub struct RouteEntry {
     pub upstream_tls: UpstreamTlsInput,
     /// `Strict-Transport-Security` value to add on TLS responses.
     pub hsts: Option<String>,
-    /// Max requests/sec per client IP (nginx `limit_req`).
+    /// Sustained requests per second per client IP (nginx `limit_req rate=`).
     pub rate_limit_rps: Option<f64>,
+    /// Requests a client may send above the rate at once (nginx `burst`). Default: one
+    /// second's worth, `rate_limit_rps` rounded down.
+    pub rate_limit_burst: Option<u32>,
+    /// Hold requests within the burst until their slot, so they reach the backend at the rate
+    /// (nginx without `nodelay`). Default false: they pass at once (`nodelay`).
+    pub rate_limit_delay: Option<bool>,
     /// Max concurrent requests per client IP (nginx `limit_conn`).
     pub max_connections: Option<usize>,
     pub load_balancer: LoadBalancerConfig,
@@ -580,8 +587,20 @@ impl RouteEntry {
                 ));
             }
         }
-        if self.rate_limit_rps.is_some_and(|rps| !(rps > 0.0)) {
-            errors.push(format!("{name}: rate_limit_rps must be greater than 0"));
+        if self
+            .rate_limit_rps
+            .is_some_and(|rps| !(rps >= 0.001) || rps.is_infinite())
+        {
+            errors.push(format!(
+                "{name}: rate_limit_rps must be at least 0.001 (one request per 1000s)"
+            ));
+        }
+        if self.rate_limit_rps.is_none()
+            && (self.rate_limit_burst.is_some() || self.rate_limit_delay.is_some())
+        {
+            errors.push(format!(
+                "{name}: rate_limit_burst and rate_limit_delay need rate_limit_rps"
+            ));
         }
         if self.max_connections == Some(0) {
             errors.push(format!("{name}: max_connections must be greater than 0"));
@@ -649,7 +668,11 @@ impl RouteEntry {
             max_body_size: self.max_body_size,
             upstream_tls: self.upstream_tls.to_upstream_tls(),
             hsts: self.hsts.clone(),
-            rate_limit_rps: self.rate_limit_rps,
+            rate_limit: self.rate_limit_rps.map(|rps| RateLimit {
+                rps,
+                burst: self.rate_limit_burst.unwrap_or(rps as u32),
+                delay: self.rate_limit_delay.unwrap_or(false),
+            }),
             max_connections: self.max_connections,
             action: self.action.as_ref().map(ActionInput::to_action),
             cache: self.cache.as_ref().map(CacheInput::to_cache),

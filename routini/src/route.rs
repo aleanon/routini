@@ -17,13 +17,13 @@ use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::prelude::HttpPeer;
 use pingora::protocols::l4::socket::SocketAddr;
 use pingora_limits::inflight::{Guard, Inflight};
-use pingora_limits::rate::Rate;
 
 use crate::{
     adaptive_loadbalancer::{
         AdaptiveBackend, AdaptiveLoadBalancer, decision_engine::AdaptiveDecisionEngine,
     },
     basic_auth::BasicAuth,
+    rate_limit::{RateLimit, RateLimiter},
 };
 
 pub type SharedLb = Arc<AdaptiveLoadBalancer<AdaptiveDecisionEngine>>;
@@ -115,27 +115,6 @@ pub enum RouteAction {
     Redirect { status: u16, location: String },
     /// Respond immediately with `status` and an optional body.
     Return { status: u16, body: Option<String> },
-}
-
-/// Per-client-IP request-rate limiter (nginx `limit_req`). Backed by a 1-second sliding window.
-pub struct RateLimiter {
-    rate: Rate,
-    max_rps: f64,
-}
-
-impl RateLimiter {
-    pub fn new(max_rps: f64) -> Self {
-        Self {
-            rate: Rate::new(Duration::from_secs(1)),
-            max_rps,
-        }
-    }
-
-    /// Record a request from `key` and return `true` if it is over the limit (reject).
-    pub fn over_limit(&self, key: &IpAddr) -> bool {
-        self.rate.observe(key, 1);
-        self.rate.rate(key) > self.max_rps
-    }
 }
 
 /// Per-client-IP concurrent-request limiter (nginx `limit_conn`).
@@ -435,8 +414,8 @@ pub struct RouteConfig {
     pub upstream_tls: UpstreamTls,
     /// `Strict-Transport-Security` header value to add on TLS responses (nginx HSTS `add_header`).
     pub hsts: Option<String>,
-    /// Max requests/sec per client IP (nginx `limit_req`). `None` = unlimited.
-    pub rate_limit_rps: Option<f64>,
+    /// Requests per second per client IP (nginx `limit_req`). `None` = unlimited.
+    pub rate_limit: Option<RateLimit>,
     /// Max concurrent requests per client IP (nginx `limit_conn`). `None` = unlimited.
     pub max_connections: Option<usize>,
     /// If set, the route short-circuits with this response instead of proxying (redirect/return).
@@ -458,7 +437,7 @@ impl Default for RouteConfig {
             max_body_size: None,
             upstream_tls: UpstreamTls::default(),
             hsts: None,
-            rate_limit_rps: None,
+            rate_limit: None,
             max_connections: None,
             action: None,
             cache: None,
@@ -479,7 +458,7 @@ pub struct RouteState {
 impl RouteState {
     pub fn new(config: RouteConfig) -> Self {
         let health = PassiveHealth::new(config.passive_health);
-        let rate_limiter = config.rate_limit_rps.map(RateLimiter::new);
+        let rate_limiter = config.rate_limit.and_then(RateLimiter::new);
         let conn_limiter = config.max_connections.map(ConnLimiter::new);
         Self {
             config,

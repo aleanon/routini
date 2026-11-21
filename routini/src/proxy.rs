@@ -30,6 +30,7 @@ use std::collections::HashMap;
 use crate::{
     adaptive_loadbalancer::{AdaptiveBackend, options::HashKey},
     load_balancing::Metrics,
+    rate_limit::Decision,
     real_ip::RealIp,
     route::{RouteAction, RouteRuntime, RouteState},
     utils::constants::{DEFAULT_PATH_CACHE_CAPACITY, DEFAULT_PATH_REMAINDER_IDENTIFIER},
@@ -665,10 +666,14 @@ impl ProxyHttp for Proxy {
         // Per-client-IP rate and concurrency limits (nginx limit_req / limit_conn).
         let client = ctx.client_ip;
         if let (Some(limiter), Some(ip)) = (&state.rate_limiter, client) {
-            if limiter.over_limit(&ip) {
-                self.write_status(session, StatusCode::TOO_MANY_REQUESTS.as_u16())
-                    .await?;
-                return Ok(true);
+            match limiter.check(ip, Instant::now()) {
+                Decision::Allow => {}
+                Decision::Delay(wait) => tokio::time::sleep(wait).await,
+                Decision::Reject => {
+                    self.write_status(session, StatusCode::TOO_MANY_REQUESTS.as_u16())
+                        .await?;
+                    return Ok(true);
+                }
             }
         }
         if let (Some(limiter), Some(ip)) = (&state.conn_limiter, client) {
