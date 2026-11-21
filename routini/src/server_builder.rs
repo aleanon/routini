@@ -28,6 +28,7 @@ use crate::{
         discovery::Static,
         strategy::{Adaptive, adaptive::AdaptiveStrategyMetrics},
     },
+    proxy::ClientTimeouts,
     real_ip::RealIp,
     reload::RouteManager,
     utils::constants::{
@@ -81,6 +82,7 @@ impl ServerBuilder {
             request_id: false,
             error_pages: HashMap::new(),
             real_ip: None,
+            client_timeouts: ClientTimeouts::default(),
             upgrade: false,
             pid_file: None,
             upgrade_sock: None,
@@ -247,6 +249,7 @@ pub struct ServerBuilder {
     request_id: bool,
     error_pages: HashMap<u16, String>,
     real_ip: Option<RealIp>,
+    client_timeouts: ClientTimeouts,
     upgrade: bool,
     pid_file: Option<String>,
     upgrade_sock: Option<String>,
@@ -348,6 +351,12 @@ impl ServerBuilder {
         self
     }
 
+    /// Timeouts on client connections. Default: nginx's (keepalive 75s, body and send 60s).
+    pub fn client_timeouts(mut self, timeouts: ClientTimeouts) -> Self {
+        self.client_timeouts = timeouts;
+        self
+    }
+
     pub fn build(self) -> Server {
         self.build_with_reload_handle().0
     }
@@ -412,6 +421,7 @@ impl ServerBuilder {
         router.set_request_id(self.request_id);
         router.set_error_pages(self.error_pages);
         router.set_real_ip(self.real_ip);
+        router.set_client_timeouts(self.client_timeouts);
 
         let mut manager_service = background_service("route-manager", manager);
         manager_service.threads = Some(2);

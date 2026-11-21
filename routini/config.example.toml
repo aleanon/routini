@@ -11,6 +11,11 @@ prometheus_address = "0.0.0.0:9000"
 # the proxy. The header is read right to left, skipping trusted addresses.
 # real_ip = { trusted_proxies = ["10.0.0.0/8", "127.0.0.1"], header = "X-Forwarded-For" }
 
+# Client connection timeouts in seconds (nginx defaults shown). keepalive 0 disables it.
+# keepalive_timeout_secs = 75
+# client_body_timeout_secs = 60
+# send_timeout_secs = 60
+
 [proxy]
 # A port (bound on all interfaces) or "host:port". Env override: SERVER_ADDRESS
 listener = 3500

@@ -9,7 +9,7 @@ use pingora::cache::{CacheMeta, CacheMetaDefaults, MemCache, RespCacheable};
 use quick_cache::sync::Cache;
 use regex::Regex;
 use std::sync::LazyLock;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use std::{net::IpAddr, sync::Arc, time::Instant};
 
 /// Shared in-memory response cache backend and its LRU eviction manager (nginx `proxy_cache_path`).
@@ -33,7 +33,10 @@ use crate::{
     rate_limit::Decision,
     real_ip::RealIp,
     route::{RouteAction, RouteRuntime, RouteState},
-    utils::constants::{DEFAULT_PATH_CACHE_CAPACITY, DEFAULT_PATH_REMAINDER_IDENTIFIER},
+    utils::constants::{
+        DEFAULT_CLIENT_BODY_TIMEOUT, DEFAULT_KEEPALIVE_TIMEOUT_SECS, DEFAULT_PATH_CACHE_CAPACITY,
+        DEFAULT_PATH_REMAINDER_IDENTIFIER, DEFAULT_SEND_TIMEOUT,
+    },
 };
 
 #[derive(Clone)]
@@ -241,6 +244,29 @@ pub struct Proxy {
     error_pages: Arc<HashMap<u16, String>>,
     /// Where to find the client address behind trusted proxies. `None`: the peer address.
     real_ip: Option<Arc<RealIp>>,
+    client_timeouts: ClientTimeouts,
+}
+
+/// Timeouts on client connections (nginx `keepalive_timeout`, `client_body_timeout`,
+/// `send_timeout`). The header of a connection's first request always has pingora's 60s.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClientTimeouts {
+    /// Idle seconds before a kept-alive HTTP/1 connection is closed, 0 disables keepalive.
+    pub keepalive_secs: u64,
+    /// Longest wait for more of the request body (HTTP/1).
+    pub body: Duration,
+    /// Longest wait for the client to take more of the response.
+    pub send: Duration,
+}
+
+impl Default for ClientTimeouts {
+    fn default() -> Self {
+        Self {
+            keepalive_secs: DEFAULT_KEEPALIVE_TIMEOUT_SECS,
+            body: DEFAULT_CLIENT_BODY_TIMEOUT,
+            send: DEFAULT_SEND_TIMEOUT,
+        }
+    }
 }
 
 /// Map a fatal proxy error to the HTTP status to return (0 = downstream gone, do not respond).
@@ -305,7 +331,12 @@ impl Proxy {
             request_id: false,
             error_pages: Arc::new(HashMap::new()),
             real_ip: None,
+            client_timeouts: ClientTimeouts::default(),
         }
+    }
+
+    pub fn set_client_timeouts(&mut self, timeouts: ClientTimeouts) {
+        self.client_timeouts = timeouts;
     }
 
     /// Take the client address from a header when the peer is a trusted proxy.
@@ -500,6 +531,23 @@ impl ProxyHttp for Proxy {
             request_id: None,
             client_ip: None,
         }
+    }
+
+    /// Apply the client timeouts before anything can answer the request.
+    async fn early_request_filter(
+        &self,
+        session: &mut Session,
+        _ctx: &mut Self::CTX,
+    ) -> Result<()> {
+        let t = self.client_timeouts;
+        // Only shorten keepalive: a client that sent `Connection: close` (or HTTP/1.0 without
+        // keep-alive) has it off, and must not get it back
+        if session.get_keepalive().is_some() {
+            session.set_keepalive((t.keepalive_secs > 0).then_some(t.keepalive_secs));
+        }
+        session.set_read_timeout(Some(t.body));
+        session.set_write_timeout(Some(t.send));
+        Ok(())
     }
 
     /// Install the downstream response-compression module at the configured level (0 = disabled).

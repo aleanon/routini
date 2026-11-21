@@ -20,6 +20,15 @@ pub const DEFAULT_GRACE_PERIOD: Duration = Duration::from_secs(5);
 /// Time the runtimes get to exit after the grace period, before being forcefully dropped.
 pub const DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
+// Client connections (nginx defaults). Pingora's own defaults keep idle HTTP/1 connections and
+// stalled writes open forever.
+/// Idle time before a kept-alive HTTP/1 connection is closed (nginx `keepalive_timeout`).
+pub const DEFAULT_KEEPALIVE_TIMEOUT_SECS: u64 = 75;
+/// Longest wait for the next piece of a request body (nginx `client_body_timeout`).
+pub const DEFAULT_CLIENT_BODY_TIMEOUT: Duration = Duration::from_secs(60);
+/// Longest wait for the client to accept more of the response (nginx `send_timeout`).
+pub const DEFAULT_SEND_TIMEOUT: Duration = Duration::from_secs(60);
+
 // Router defaults
 pub const DEFAULT_PATH_REMAINDER_IDENTIFIER: &str = "rest";
 pub const DEFAULT_WILDCARD_IDENTIFIER: &str = "{*rest}";

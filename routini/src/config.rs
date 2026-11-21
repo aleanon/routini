@@ -21,6 +21,7 @@ use crate::{
     },
     basic_auth::BasicAuth,
     load_balancing::strategy::Adaptive,
+    proxy::ClientTimeouts,
     rate_limit::RateLimit,
     real_ip::RealIp,
     route::{
@@ -207,6 +208,17 @@ impl Config {
                 errors.push(format!("server.real_ip: {err}"));
             }
         }
+        for (field, value) in [
+            (
+                "client_body_timeout_secs",
+                self.server.client_body_timeout_secs,
+            ),
+            ("send_timeout_secs", self.server.send_timeout_secs),
+        ] {
+            if value == Some(0) {
+                errors.push(format!("server.{field} must be greater than 0"));
+            }
+        }
         if self.server.worker_threads == Some(0) {
             errors.push("server.worker_threads must be greater than 0".to_string());
         }
@@ -302,6 +314,7 @@ impl Config {
         if let Some(real_ip) = &server.real_ip {
             builder = builder.real_ip(real_ip.to_real_ip()?);
         }
+        builder = builder.client_timeouts(server.client_timeouts());
         if let Some(tls) = &self.proxy.tls {
             builder = builder.tls(tls.to_builder_tls());
         }
@@ -392,6 +405,30 @@ pub struct ServerConfig {
     pub upgrade_sock: Option<String>,
     /// Take the client address from a header set by trusted proxies (nginx `real_ip`).
     pub real_ip: Option<RealIpInput>,
+    /// Idle seconds before a kept-alive client connection is closed, 0 disables keepalive
+    /// (nginx `keepalive_timeout`). Default 75.
+    pub keepalive_timeout_secs: Option<u64>,
+    /// Longest wait for more of a request body (nginx `client_body_timeout`). Default 60.
+    pub client_body_timeout_secs: Option<u64>,
+    /// Longest wait for a client to take more of the response (nginx `send_timeout`).
+    /// Default 60.
+    pub send_timeout_secs: Option<u64>,
+}
+
+impl ServerConfig {
+    pub fn client_timeouts(&self) -> ClientTimeouts {
+        let mut t = ClientTimeouts::default();
+        if let Some(secs) = self.keepalive_timeout_secs {
+            t.keepalive_secs = secs;
+        }
+        if let Some(secs) = self.client_body_timeout_secs {
+            t.body = Duration::from_secs(secs);
+        }
+        if let Some(secs) = self.send_timeout_secs {
+            t.send = Duration::from_secs(secs);
+        }
+        t
+    }
 }
 
 /// nginx `set_real_ip_from` / `real_ip_header` / `real_ip_recursive on`, see [RealIp].
@@ -1447,6 +1484,24 @@ mod tests {
         ));
         let err = errors_of(&config);
         assert!(err.contains("health_check_interval_secs is 0"), "{err}");
+    }
+
+    #[test]
+    fn client_timeouts_default_to_nginx_values() {
+        let defaults = toml(MINIMAL_TOML).server.client_timeouts();
+        assert_eq!(defaults, ClientTimeouts::default());
+        assert_eq!(defaults.keepalive_secs, 75);
+        assert_eq!(defaults.send, Duration::from_secs(60));
+
+        let config = toml(&format!(
+            "[server]\nkeepalive_timeout_secs = 0\nclient_body_timeout_secs = 5\n{MINIMAL_TOML}"
+        ));
+        config.validate().unwrap();
+        let t = config.server.client_timeouts();
+        assert_eq!((t.keepalive_secs, t.body), (0, Duration::from_secs(5)));
+
+        let config = toml(&format!("[server]\nsend_timeout_secs = 0\n{MINIMAL_TOML}"));
+        assert!(errors_of(&config).contains("send_timeout_secs must be greater than 0"));
     }
 
     #[test]

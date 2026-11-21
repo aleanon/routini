@@ -327,3 +327,87 @@ async fn rate_limit_allows_a_burst_per_client_then_rejects_or_delays() {
         StatusCode::OK
     );
 }
+
+/// Send one HTTP/1.1 request on `stream` and read the whole response (the worker sets
+/// Content-Length). Returns whether the server announced it keeps the connection open.
+async fn exchange(stream: &mut tokio::net::TcpStream, extra_header: &str) -> bool {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let request = format!("GET /a/health HTTP/1.1\r\nHost: test\r\n{extra_header}\r\n");
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut response = Vec::new();
+    let mut buf = [0; 4096];
+    loop {
+        let n = stream.read(&mut buf).await.unwrap();
+        assert!(n > 0, "connection closed before the response was complete");
+        response.extend_from_slice(&buf[..n]);
+        let text = String::from_utf8_lossy(&response).to_lowercase();
+        if let Some((head, body)) = text.split_once("\r\n\r\n") {
+            let length: usize = head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length:"))
+                .map(|v| v.trim().parse().unwrap())
+                .unwrap_or(0);
+            if body.len() >= length {
+                assert!(head.starts_with("http/1.1 200"), "{head}");
+                return !head.contains("connection: close");
+            }
+        }
+    }
+}
+
+/// Whether the server closes `stream` within `within`.
+async fn closed_within(stream: &mut tokio::net::TcpStream, within: std::time::Duration) -> bool {
+    use tokio::io::AsyncReadExt;
+    let mut buf = [0; 1];
+    matches!(
+        tokio::time::timeout(within, stream.read(&mut buf)).await,
+        Ok(Ok(0)) | Ok(Err(_))
+    )
+}
+
+#[tokio::test]
+async fn idle_client_connections_are_closed_after_the_keepalive_timeout() {
+    use std::time::Duration;
+    let b = TestApp::create_backends(1).await.unwrap();
+    let ports = Ports::new();
+    let app = ReloadApp::start(
+        config(
+            &ports,
+            "keepalive_timeout_secs = 1",
+            &route("/a/*", &[&b[0]], "", ""),
+        ),
+        None,
+    )
+    .await;
+    let address = app.base.trim_start_matches("http://").to_string();
+    let connect = || tokio::net::TcpStream::connect(address.clone());
+
+    // Kept alive for another request, then closed once idle for the timeout
+    let mut stream = connect().await.unwrap();
+    assert!(exchange(&mut stream, "").await);
+    assert!(exchange(&mut stream, "").await, "still open for reuse");
+    assert!(!closed_within(&mut stream, Duration::from_millis(500)).await);
+    assert!(closed_within(&mut stream, Duration::from_secs(2)).await);
+
+    // A client asking to close is not kept alive by the timeout
+    let mut stream = connect().await.unwrap();
+    assert!(!exchange(&mut stream, "Connection: close\r\n").await);
+    assert!(closed_within(&mut stream, Duration::from_millis(500)).await);
+
+    // 0 disables keepalive
+    let ports = Ports::new();
+    let app = ReloadApp::start(
+        config(
+            &ports,
+            "keepalive_timeout_secs = 0",
+            &route("/a/*", &[&b[0]], "", ""),
+        ),
+        None,
+    )
+    .await;
+    let mut stream = tokio::net::TcpStream::connect(app.base.trim_start_matches("http://"))
+        .await
+        .unwrap();
+    assert!(!exchange(&mut stream, "").await);
+    assert!(closed_within(&mut stream, Duration::from_millis(500)).await);
+}
