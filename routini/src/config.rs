@@ -29,7 +29,7 @@ use crate::{
         RouteAction, RouteConfig, TimeoutConfig, UpstreamTls,
     },
     server_builder::{Route, ServerBuilder, TlsConfig as BuilderTlsConfig},
-    tls::check_cert_and_key,
+    tls::{self, CertPair, TlsOptions, TlsVersion},
     utils::{
         config_loader::ConfigFormat,
         constants::{
@@ -115,7 +115,15 @@ impl Config {
     /// they don't depend on the working directory routini is started from.
     pub fn resolve_paths(&mut self, config_dir: &std::path::Path) {
         if let Some(tls) = &mut self.proxy.tls {
-            for path in [&mut tls.cert_path, &mut tls.key_path] {
+            let paths = [&mut tls.cert_path, &mut tls.key_path]
+                .into_iter()
+                .chain(tls.client_ca_path.as_mut())
+                .chain(
+                    tls.certificates
+                        .iter_mut()
+                        .flat_map(|c| [&mut c.cert_path, &mut c.key_path]),
+                );
+            for path in paths {
                 if std::path::Path::new(path.as_str()).is_relative() {
                     *path = config_dir.join(&*path).to_string_lossy().into_owned();
                 }
@@ -184,8 +192,13 @@ impl Config {
             }
         }
         if let Some(tls) = &self.proxy.tls {
-            if let Err(err) = check_cert_and_key(&tls.cert_path, &tls.key_path) {
-                errors.push(format!("proxy.tls: {err}"));
+            match tls.to_options() {
+                Ok(options) => {
+                    if let Err(err) = tls::check(&options) {
+                        errors.push(format!("proxy.tls: {err:#}"));
+                    }
+                }
+                Err(err) => errors.push(format!("proxy.tls: {err}")),
             }
         }
 
@@ -316,7 +329,7 @@ impl Config {
         }
         builder = builder.client_timeouts(server.client_timeouts());
         if let Some(tls) = &self.proxy.tls {
-            builder = builder.tls(tls.to_builder_tls());
+            builder = builder.tls(tls.to_builder_tls()?);
         }
         Ok(builder.applied_config(self))
     }
@@ -503,20 +516,63 @@ pub struct ProxyConfig {
 #[serde(deny_unknown_fields)]
 pub struct TlsConfig {
     pub listener: Listen,
+    /// The default certificate: served without SNI, or when no other certificate matches.
     pub cert_path: String,
     pub key_path: String,
     #[serde(default = "default_true")]
     pub enable_h2: bool,
+    /// More certificates, each served for the DNS names it lists (nginx: one `server` block
+    /// with `ssl_certificate` per name). Reloaded with the config, no restart needed.
+    #[serde(default)]
+    pub certificates: Vec<CertInput>,
+    /// Lowest protocol version accepted: "1.2" (default) or "1.3" (nginx `ssl_protocols`).
+    pub min_version: Option<String>,
+    /// Require client certificates issued by these CAs (nginx `ssl_verify_client on`).
+    pub client_ca_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CertInput {
+    pub cert_path: String,
+    pub key_path: String,
 }
 
 impl TlsConfig {
-    pub fn to_builder_tls(&self) -> BuilderTlsConfig {
-        BuilderTlsConfig {
-            address: self.listener.address(),
-            cert_path: self.cert_path.clone(),
-            key_path: self.key_path.clone(),
+    pub fn to_options(&self) -> Result<TlsOptions> {
+        let min_version = match self.min_version.as_deref() {
+            None | Some("1.2") => TlsVersion::Tls12,
+            Some("1.3") => TlsVersion::Tls13,
+            Some(other) => {
+                return Err(eyre!(
+                    "min_version must be \"1.2\" or \"1.3\", got \"{other}\""
+                ));
+            }
+        };
+        Ok(TlsOptions {
+            default_cert: CertPair {
+                cert_path: self.cert_path.clone(),
+                key_path: self.key_path.clone(),
+            },
+            certificates: self
+                .certificates
+                .iter()
+                .map(|c| CertPair {
+                    cert_path: c.cert_path.clone(),
+                    key_path: c.key_path.clone(),
+                })
+                .collect(),
+            min_version,
+            client_ca_path: self.client_ca_path.clone(),
             enable_h2: self.enable_h2,
-        }
+        })
+    }
+
+    pub fn to_builder_tls(&self) -> Result<BuilderTlsConfig> {
+        Ok(BuilderTlsConfig {
+            address: self.listener.address(),
+            options: self.to_options()?,
+        })
     }
 }
 
@@ -1438,12 +1494,34 @@ mod tests {
     fn relative_tls_paths_resolve_against_the_config_dir() {
         let mut config = toml(&MINIMAL_TOML.replace(
             "listener = 3500",
-            "listener = 3500\n[proxy.tls]\nlistener = 3443\ncert_path = \"certs/c.pem\"\nkey_path = \"/abs/k.pem\"",
+            "listener = 3500\n[proxy.tls]\nlistener = 3443\ncert_path = \"certs/c.pem\"\nkey_path = \"/abs/k.pem\"\n\
+             client_ca_path = \"ca.pem\"\n\
+             [[proxy.tls.certificates]]\ncert_path = \"b.pem\"\nkey_path = \"b.key\"",
         ));
         config.resolve_paths(std::path::Path::new("/etc/routini"));
         let tls = config.proxy.tls.unwrap();
         assert_eq!(tls.cert_path, "/etc/routini/certs/c.pem");
         assert_eq!(tls.key_path, "/abs/k.pem");
+        assert_eq!(tls.client_ca_path.as_deref(), Some("/etc/routini/ca.pem"));
+        assert_eq!(tls.certificates[0].cert_path, "/etc/routini/b.pem");
+        assert_eq!(tls.certificates[0].key_path, "/etc/routini/b.key");
+    }
+
+    #[test]
+    fn tls_min_version_is_validated() {
+        let dir = crate::tls::test_certs::temp_dir("min-version");
+        let (cert, key) = crate::tls::test_certs::write(&dir);
+        let with = |extra: &str| {
+            toml(&MINIMAL_TOML.replace(
+                "listener = 3500",
+                &format!(
+                    "listener = 3500\n[proxy.tls]\nlistener = 3443\ncert_path = \"{cert}\"\n\
+                     key_path = \"{key}\"\n{extra}"
+                ),
+            ))
+        };
+        with("min_version = \"1.3\"").validate().unwrap();
+        assert!(errors_of(&with("min_version = \"1.1\"")).contains("min_version must be"));
     }
 
     #[test]

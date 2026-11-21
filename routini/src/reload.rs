@@ -11,8 +11,9 @@
 //! | headers, timeouts, retry, limits, auth, cache, ...    | route state swapped (limiter counters reset) |
 //! | health check added, removed or changed (not interval) | that route is rebuilt (its metrics reset) |
 //! | new / removed route                                   | started / stopped                         |
-//! | `server`, `proxy.listener`, `proxy.tls`               | reported as requiring a restart or upgrade |
-//! | TLS certificate files changed on disk                 | reported as requiring an upgrade (pingora's rustls listener can't swap them) |
+//! | `proxy.tls` certificates (listed or their files)      | loaded and swapped live for new connections |
+//! | `server`, `proxy.listener`, other `proxy.tls` settings| reported as requiring a restart or upgrade |
+//! | TLS client CA file changed on disk                    | reported as requiring a restart or upgrade |
 //!
 //! Routes are identified by `(host, regex, path)`. The routing table is rebuilt and swapped as a
 //! whole, so the per-path lookup caches start fresh. A config that fails to parse or validate is
@@ -44,7 +45,7 @@ use crate::{
     proxy::{Proxy, RouteValue, RoutingTable},
     route::{RouteRuntime, SharedLb},
     server_builder::Route,
-    tls,
+    tls::{self, CertResolver, CertStore, TlsVersion},
     utils::{config_loader::load_config_from, constants::DEFAULT_PATH_CACHE_CAPACITY},
 };
 
@@ -165,10 +166,25 @@ struct State {
     routes: Vec<ManagedRoute>,
     /// Last applied config, to diff route settings and detect changes that need a restart.
     applied: Option<Config>,
-    /// Hash of the TLS certificate and key the listener was started with. The listener can't
-    /// swap them, so a reload only reports when they changed on disk.
-    tls_fingerprint: Option<u64>,
+    /// Hash of the certificate and key files currently served, to reload them when they
+    /// change on disk even if the config didn't.
+    cert_fingerprint: Option<u64>,
+    /// Hash of the client CA file the listener started with. Its verifier can't be swapped, a
+    /// change on disk is reported as needing a restart.
+    client_ca_fingerprint: Option<u64>,
     started: bool,
+}
+
+/// The parts of `proxy.tls` that are fixed for the listener's lifetime.
+fn tls_listener_settings(config: &Config) -> Option<(String, bool, TlsVersion, Option<String>)> {
+    let tls = config.proxy.tls.as_ref()?;
+    let options = tls.to_options().ok()?;
+    Some((
+        tls.listener.address(),
+        options.enable_h2,
+        options.min_version,
+        options.client_ca_path,
+    ))
 }
 
 /// Owns the routes of a running server and applies config reloads. Runs as a pingora background
@@ -177,6 +193,8 @@ pub struct RouteManager {
     proxy: Proxy,
     config_path: Option<PathBuf>,
     state: Mutex<State>,
+    /// Serves the TLS listener's certificates; a reload swaps in newly loaded ones.
+    cert_resolver: Option<Arc<CertResolver>>,
 }
 
 impl RouteManager {
@@ -187,22 +205,25 @@ impl RouteManager {
         routes: Vec<Route>,
         config_path: Option<PathBuf>,
         applied: Option<Config>,
+        cert_resolver: Option<Arc<CertResolver>>,
     ) -> Result<(Self, Proxy)> {
         let routes: Vec<ManagedRoute> = routes.into_iter().map(ManagedRoute::new).collect();
         let proxy = Proxy::with_table(build_table(&routes)?);
-        let tls_fingerprint = applied
+        let tls = applied
             .as_ref()
             .and_then(|c| c.proxy.tls.as_ref())
-            .and_then(|tls| tls::fingerprint(&tls.cert_path, &tls.key_path));
+            .and_then(|tls| tls.to_options().ok());
         let manager = Self {
             proxy: proxy.clone(),
             config_path,
             state: Mutex::new(State {
                 routes,
+                cert_fingerprint: tls.as_ref().and_then(tls::cert_fingerprint),
+                client_ca_fingerprint: tls.as_ref().and_then(tls::client_ca_fingerprint),
                 applied,
-                tls_fingerprint,
                 started: false,
             }),
+            cert_resolver,
         };
         Ok((manager, proxy))
     }
@@ -247,6 +268,33 @@ impl RouteManager {
         let mut state = self.state.lock().await;
         let started = state.started;
         let mut report = ReloadReport::default();
+
+        // Load new certificates before changing anything, so a broken one fails the reload
+        // as a whole. Reloaded when the listed files or their contents changed.
+        let same_listener = state.applied.as_ref().is_some_and(|applied| {
+            tls_listener_settings(applied) == tls_listener_settings(&config)
+        });
+        let new_certs = match (&self.cert_resolver, &config.proxy.tls) {
+            (Some(_), Some(tls)) if same_listener => {
+                let options = tls.to_options()?;
+                let fingerprint = tls::cert_fingerprint(&options);
+                let listed_changed = state
+                    .applied
+                    .as_ref()
+                    .and_then(|a| a.proxy.tls.as_ref())
+                    .and_then(|old| old.to_options().ok())
+                    .is_none_or(|old| {
+                        (&old.default_cert, &old.certificates)
+                            != (&options.default_cert, &options.certificates)
+                    });
+                if listed_changed || fingerprint != state.cert_fingerprint {
+                    Some((CertStore::load(&options)?, fingerprint))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
 
         let old_entries: HashMap<RouteKey, RouteEntry> = state
             .applied
@@ -305,24 +353,29 @@ impl RouteManager {
                     "proxy.listener",
                     applied.proxy.listener != config.proxy.listener,
                 ),
-                ("proxy.tls", applied.proxy.tls != config.proxy.tls),
+                ("proxy.tls", !same_listener),
             ] {
                 if changed {
                     report.restart_required.push(section.to_string());
                 }
             }
         }
-        let same_tls_files = state
-            .applied
-            .as_ref()
-            .is_some_and(|applied| applied.proxy.tls == config.proxy.tls);
-        if let Some(tls) = &config.proxy.tls {
-            if same_tls_files
-                && tls::fingerprint(&tls.cert_path, &tls.key_path) != state.tls_fingerprint
-            {
+        if let (Some(resolver), Some((store, fingerprint))) = (&self.cert_resolver, new_certs) {
+            resolver.replace(store);
+            state.cert_fingerprint = fingerprint;
+            report.updated.push("proxy.tls certificates".to_string());
+        }
+        if same_listener {
+            let ca = config
+                .proxy
+                .tls
+                .as_ref()
+                .and_then(|tls| tls.to_options().ok())
+                .and_then(|options| tls::client_ca_fingerprint(&options));
+            if ca != state.client_ca_fingerprint {
                 report
                     .restart_required
-                    .push("proxy.tls certificate files changed on disk".to_string());
+                    .push("proxy.tls client CA file changed on disk".to_string());
             }
         }
         state.applied = Some(config);

@@ -24,7 +24,7 @@ debug = true
 strip = false
 
 [dependencies]
-pingora = { git = "https://github.com/aleanon/pingora.git", branch = "stream-end-hook", features = [
+pingora = { git = "https://github.com/aleanon/pingora.git", branch = "rustls-server-config", features = [
     "lb",
     "proxy",
     "cache",
@@ -69,6 +69,8 @@ toml = "0.9"
 libc = "0.2"
 daemonize = "0.5"
 bcrypt = "0.19.3"
+rustls = "0.23"
+x509-parser = "0.16.0"
 
 
 [dev-dependencies]

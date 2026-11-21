@@ -31,6 +31,7 @@ use crate::{
     proxy::ClientTimeouts,
     real_ip::RealIp,
     reload::RouteManager,
+    tls::{self, TlsOptions},
     utils::constants::{
         DEFAULT_GRACE_PERIOD, DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT, DEFAULT_WILDCARD_IDENTIFIER,
         PROMETHEUS_ENDPOINT_ADDRESS,
@@ -44,10 +45,8 @@ pub use crate::route::RouteConfig;
 /// TLS termination settings for the proxy's public listener.
 pub struct TlsConfig {
     pub address: String,
-    pub cert_path: String,
-    pub key_path: String,
-    /// Advertise HTTP/2 (and HTTP/1.1) via ALPN. Off means HTTP/1.1 only.
-    pub enable_h2: bool,
+    /// Certificates, protocol versions, client authentication and ALPN, see [crate::tls].
+    pub options: TlsOptions,
 }
 
 const PATH_REGEX_PATTERN: &str = r"^/[^*]*\*?$";
@@ -395,18 +394,24 @@ impl ServerBuilder {
                 None => tracing::info!("Adding route: {}", route.path),
             }
         }
+        // Shared with the route manager, which swaps in new certificates on reload
+        let tls = self.tls.map(|tls| {
+            let store = tls::CertStore::load(&tls.options)
+                .expect("Failed to load TLS certificates, validate the config first");
+            (tls, Arc::new(tls::CertResolver::new(store)))
+        });
         let (manager, mut router) = RouteManager::new(
             self.routes,
             self.reload_config_path.map(PathBuf::from),
             self.applied_config,
+            tls.as_ref().map(|(_, resolver)| resolver.clone()),
         )
         .expect("Invalid route");
         router.set_access_log(self.access_log);
         router.set_https_redirect(self.https_redirect);
-        if let Some(port) = self
-            .tls
+        if let Some(port) = tls
             .as_ref()
-            .and_then(|tls| tls.address.rsplit_once(':'))
+            .and_then(|(tls, _)| tls.address.rsplit_once(':'))
             .and_then(|(_, port)| port.parse().ok())
         {
             router.set_https_port(port);
@@ -427,12 +432,10 @@ impl ServerBuilder {
         router_service.threads = Some(available_parallelism);
         router_service.add_tcp(&self.address);
 
-        if let Some(tls) = self.tls {
-            let mut settings = TlsSettings::intermediate(&tls.cert_path, &tls.key_path)
-                .expect("Failed to load TLS certificate/key");
-            if tls.enable_h2 {
-                settings.enable_h2();
-            }
+        if let Some((tls, resolver)) = tls {
+            let config = tls::server_config(&tls.options, resolver)
+                .expect("Invalid TLS settings, validate the config first");
+            let settings = TlsSettings::with_server_config(Arc::new(config));
             router_service.add_tls_with_settings(&tls.address, None, settings);
             tracing::info!("TLS termination enabled on {}", tls.address);
         }

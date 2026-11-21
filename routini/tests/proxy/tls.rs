@@ -26,6 +26,8 @@ struct Options {
     h2: bool,
     redirect: bool,
     trusted_proxy: bool,
+    /// Appended to the `[proxy.tls]` table.
+    tls_extra: String,
 }
 
 impl Default for Options {
@@ -34,11 +36,13 @@ impl Default for Options {
             h2: true,
             redirect: true,
             trusted_proxy: false,
+            tls_extra: String::new(),
         }
     }
 }
 
 struct TlsApp {
+    tls_port: u16,
     https: String,
     plain: String,
     cert_pem: String,
@@ -60,7 +64,7 @@ impl TlsApp {
              grace_period_seconds = 0\nhttps_redirect = {redirect}\n\n\
              [proxy]\nlistener = \"127.0.0.1:{plain_port}\"\n\n\
              [proxy.tls]\nlistener = \"127.0.0.1:{tls_port}\"\ncert_path = \"cert.pem\"\n\
-             key_path = \"key.pem\"\nenable_h2 = {h2}\n\n\
+             key_path = \"key.pem\"\nenable_h2 = {h2}\n{tls_extra}\n\n\
              [[proxy.router]]\npath = \"/a/*\"\n\
              [proxy.router.headers]\ntrusted_proxy = {trusted}\n\
              [proxy.router.load_balancer]\nhealth_check_interval_secs = 0\n\
@@ -68,6 +72,7 @@ impl TlsApp {
             redirect = opts.redirect,
             h2 = opts.h2,
             trusted = opts.trusted_proxy,
+            tls_extra = opts.tls_extra,
         );
         let file = dir.join("config.toml");
         std::fs::write(&file, toml).unwrap();
@@ -81,15 +86,20 @@ impl TlsApp {
         std::thread::spawn(move || server.run_forever());
 
         let app = Self {
+            tls_port,
             https: format!("https://127.0.0.1:{tls_port}"),
             plain: format!("http://127.0.0.1:{plain_port}"),
             cert_pem,
             dir,
             manager,
         };
-        let client = app.client(false);
+        // A TCP connect, so listeners that require client certificates are probed too
         for _ in 0..100 {
-            if client.get(&app.https).send().await.is_ok() {
+            if tokio::net::TcpStream::connect(("127.0.0.1", tls_port))
+                .await
+                .is_ok()
+                && app.manager.is_running().await
+            {
                 return app;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -263,27 +273,205 @@ async fn plain_http_is_redirected_to_the_tls_listener() {
     assert_eq!(res.text().await.unwrap(), b[0]);
 }
 
+/// A self-signed certificate for `names`, written to `<dir>/<stem>.pem` and `.key`. Returns
+/// the certificate PEM.
+fn write_named(dir: &std::path::Path, stem: &str, names: &[&str]) -> String {
+    let names = names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+    let cert = rcgen::generate_simple_self_signed(names).unwrap();
+    std::fs::write(dir.join(format!("{stem}.pem")), cert.cert.pem()).unwrap();
+    std::fs::write(
+        dir.join(format!("{stem}.key")),
+        cert.key_pair.serialize_pem(),
+    )
+    .unwrap();
+    cert.cert.pem()
+}
+
+/// A fresh client (new connections) for `https://<name>:<port>` that trusts only `cert_pem`,
+/// so a handshake succeeds only if the server presents that certificate.
+fn client_trusting(app: &TlsApp, name: &str, cert_pem: &str) -> (reqwest::Client, String) {
+    let client = reqwest::Client::builder()
+        .tls_built_in_root_certs(false)
+        .add_root_certificate(Certificate::from_pem(cert_pem.as_bytes()).unwrap())
+        .resolve(name, ([127, 0, 0, 1], app.tls_port).into())
+        .build()
+        .unwrap();
+    (client, format!("https://{name}:{}/a/health", app.tls_port))
+}
+
+async fn handshake_ok(app: &TlsApp, name: &str, cert_pem: &str) -> bool {
+    let (client, url) = client_trusting(app, name, cert_pem);
+    client.get(url).send().await.is_ok()
+}
+
 #[tokio::test]
-async fn reload_reports_rotated_certificates_as_needing_an_upgrade() {
+async fn certificates_are_selected_by_sni() {
+    let b = TestApp::create_backends(1).await.unwrap();
+    // The app writes its default certificate for 127.0.0.1 into its dir; the others are
+    // written there before it starts (relative paths resolve against the config dir)
+    let dir = std::env::temp_dir().join(format!("routini-tls-it-sni-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let api = write_named(&dir, "api", &["api.test"]);
+    let apps = write_named(&dir, "apps", &["*.apps.test"]);
+    let opts = Options {
+        tls_extra: "[[proxy.tls.certificates]]\ncert_path = \"api.pem\"\nkey_path = \"api.key\"\n\
+                    [[proxy.tls.certificates]]\ncert_path = \"apps.pem\"\nkey_path = \"apps.key\""
+            .into(),
+        ..Default::default()
+    };
+    let app = TlsApp::start("sni", &b[0], opts).await;
+
+    assert!(handshake_ok(&app, "api.test", &api).await);
+    assert!(handshake_ok(&app, "one.apps.test", &apps).await);
+    // Unknown names get the default certificate, not api.test's
+    assert!(!handshake_ok(&app, "other.test", &api).await);
+    let (client, _) = client_trusting(&app, "other.test", &app.cert_pem);
+    let res = client.get(format!("{}/a/health", app.https)).send().await;
+    assert!(res.is_ok(), "no SNI for an IP: the default certificate");
+}
+
+#[tokio::test]
+async fn rotated_certificates_are_served_after_a_reload() {
     let b = TestApp::create_backends(1).await.unwrap();
     let app = TlsApp::start("rotate", &b[0], Options::default()).await;
+    let old = app.cert_pem.clone();
 
     let report = app.manager.reload_from_file().await.unwrap();
     assert!(report.restart_required.is_empty(), "{report:?}");
-
-    write_cert(&app.dir);
-    let report = app.manager.reload_from_file().await.unwrap();
-    assert_eq!(
-        report.restart_required,
-        vec!["proxy.tls certificate files changed on disk"]
+    assert!(
+        !report
+            .updated
+            .contains(&"proxy.tls certificates".to_string())
     );
 
-    // Still serving the certificate it started with
+    // Same paths, new contents
+    let new = write_cert(&app.dir);
+    let report = app.manager.reload_from_file().await.unwrap();
+    assert!(report.restart_required.is_empty(), "{report:?}");
+    assert!(
+        report
+            .updated
+            .contains(&"proxy.tls certificates".to_string()),
+        "{report:?}"
+    );
+
+    let (client, url) = client_trusting(&app, "127.0.0.1", &new);
+    assert_eq!(
+        client.get(url).send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    let (client, url) = client_trusting(&app, "127.0.0.1", &old);
+    assert!(
+        client.get(url).send().await.is_err(),
+        "old certificate no longer served"
+    );
+}
+
+#[tokio::test]
+async fn a_broken_certificate_fails_the_reload_and_keeps_serving() {
+    let b = TestApp::create_backends(1).await.unwrap();
+    let app = TlsApp::start("broken", &b[0], Options::default()).await;
+    std::fs::write(app.dir.join("cert.pem"), "not a certificate").unwrap();
+    assert!(app.manager.reload_from_file().await.is_err());
     let res = app
         .client(false)
         .get(format!("{}/a/health", app.https))
         .send()
-        .await
+        .await;
+    assert_eq!(res.unwrap().status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn min_version_refuses_older_clients() {
+    let b = TestApp::create_backends(1).await.unwrap();
+    let opts = Options {
+        tls_extra: "min_version = \"1.3\"".into(),
+        ..Default::default()
+    };
+    let app = TlsApp::start("tls13", &b[0], opts).await;
+    let tls12_only = reqwest::Client::builder()
+        .add_root_certificate(Certificate::from_pem(app.cert_pem.as_bytes()).unwrap())
+        .max_tls_version(reqwest::tls::Version::TLS_1_2)
+        .build()
         .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
+    assert!(
+        tls12_only
+            .get(format!("{}/a/health", app.https))
+            .send()
+            .await
+            .is_err()
+    );
+    let res = app
+        .client(false)
+        .get(format!("{}/a/health", app.https))
+        .send()
+        .await;
+    assert_eq!(res.unwrap().status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn client_certificates_are_required_with_a_client_ca() {
+    use rcgen::{BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair};
+    let b = TestApp::create_backends(1).await.unwrap();
+
+    let dir = std::env::temp_dir().join(format!("routini-tls-it-mtls-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let issue = |ca: Option<(&rcgen::Certificate, &KeyPair)>| {
+        let mut params = CertificateParams::new(vec!["client".to_string()]).unwrap();
+        let key = KeyPair::generate().unwrap();
+        let cert = match ca {
+            Some((ca, ca_key)) => {
+                params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+                params.signed_by(&key, ca, ca_key).unwrap()
+            }
+            None => {
+                params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+                params.self_signed(&key).unwrap()
+            }
+        };
+        (cert, key)
+    };
+    let (ca, ca_key) = issue(None);
+    std::fs::write(dir.join("clients.pem"), ca.pem()).unwrap();
+    let (client_cert, client_key) = issue(Some((&ca, &ca_key)));
+    let (other_ca, other_key) = issue(None);
+    let (stranger, stranger_key) = issue(Some((&other_ca, &other_key)));
+
+    let opts = Options {
+        tls_extra: format!("client_ca_path = \"{}\"", dir.join("clients.pem").display()),
+        ..Default::default()
+    };
+    let app = TlsApp::start("mtls", &b[0], opts).await;
+    let with_identity = |cert: &rcgen::Certificate, key: &KeyPair| {
+        let identity = reqwest::Identity::from_pkcs8_pem(
+            cert.pem().as_bytes(),
+            key.serialize_pem().as_bytes(),
+        )
+        .unwrap();
+        reqwest::Client::builder()
+            .add_root_certificate(Certificate::from_pem(app.cert_pem.as_bytes()).unwrap())
+            .identity(identity)
+            .build()
+            .unwrap()
+    };
+    let url = format!("{}/a/health", app.https);
+
+    let res = with_identity(&client_cert, &client_key)
+        .get(&url)
+        .send()
+        .await;
+    assert_eq!(res.unwrap().status(), StatusCode::OK);
+    assert!(
+        app.client(false).get(&url).send().await.is_err(),
+        "no client certificate"
+    );
+    assert!(
+        with_identity(&stranger, &stranger_key)
+            .get(&url)
+            .send()
+            .await
+            .is_err(),
+        "certificate from another CA"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

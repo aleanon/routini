@@ -149,13 +149,15 @@ LOG_JSON=1 cargo run
   `RouteEntry`; upstreams swapped via discovery (kept backends keep metrics/health), LB tuning
   and strategy applied live, `RouteState` swapped only if route settings changed, a health
   check added/removed/changed rebuilds, routes added/removed
-- `server`, `proxy.listener`, `proxy.tls` and changed cert files are reported as restart-required
+- TLS certificates (listed or changed on disk) are loaded first and swapped live; `server`,
+  `proxy.listener` and the TLS listener's own settings are reported as restart-required
 
 **TLS** (`routini/src/tls.rs`)
-- Pingora `rustls` feature; `proxy.tls` = separate listener, cert/key (relative to the config
-  file), `enable_h2` via ALPN
-- Pingora's rustls listener panics on bad files and has no cert callback: `check_cert_and_key`
-  validates first, rotation = graceful upgrade
+- Pingora `rustls` feature; the listener takes a `ServerConfig` built by routini
+  (`TlsSettings::with_server_config`, on the fork's `rustls-server-config` branch)
+- `CertResolver` (`ArcSwap<CertStore>`): default cert + `proxy.tls.certificates` picked by SNI
+  (SAN names, `*.` wildcards); reload swaps the store. `min_version`, `client_ca_path` (mTLS)
+  and `enable_h2` are fixed for the listener's lifetime. `tls::check` validates everything first
 
 **Process Lifecycle** (`routini/src/shutdown.rs`, `routini/src/main.rs`)
 - SIGTERM / first SIGINT: graceful drain (5s + 5s defaults); second signal forces exit (130)
