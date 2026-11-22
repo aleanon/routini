@@ -21,8 +21,10 @@ use std::{
 
 use arc_swap::ArcSwap;
 use color_eyre::eyre::{Result, WrapErr, eyre};
-use pingora::tls::{
-    CertificateDer, RootCertStore, ServerConfig, load_certs_and_key_files, version,
+use pingora::{
+    protocols::tls::CaType,
+    tls::{CertificateDer, RootCertStore, ServerConfig, load_certs_and_key_files, version},
+    utils::tls::{CertKey, WrappedX509},
 };
 use rustls::{
     crypto::CryptoProvider,
@@ -212,22 +214,74 @@ impl ResolvesServerCert for CertResolver {
     }
 }
 
-/// Load the CA certificates client certificates must chain to.
-fn client_roots(path: &str) -> Result<RootCertStore> {
-    let pem = std::fs::read(path).wrap_err_with(|| format!("failed to read client CA '{path}'"))?;
-    let mut roots = RootCertStore::empty();
+/// The DER certificates in a PEM file, at least one.
+fn pem_certificates(path: &str, what: &str) -> Result<Vec<Vec<u8>>> {
+    let pem = std::fs::read(path).wrap_err_with(|| format!("failed to read {what} '{path}'"))?;
+    let mut certs = Vec::new();
     for block in x509_parser::pem::Pem::iter_from_buffer(&pem) {
-        let block = block.map_err(|err| eyre!("client CA '{path}': invalid PEM: {err}"))?;
+        let block = block.map_err(|err| eyre!("{what} '{path}': invalid PEM: {err}"))?;
         if block.label == "CERTIFICATE" {
-            roots
-                .add(CertificateDer::from(block.contents))
-                .map_err(|err| eyre!("client CA '{path}': {err}"))?;
+            certs.push(block.contents);
         }
     }
-    if roots.is_empty() {
-        return Err(eyre!("client CA '{path}' contains no certificate"));
+    if certs.is_empty() {
+        return Err(eyre!("{what} '{path}' contains no certificate"));
+    }
+    Ok(certs)
+}
+
+/// Load the CA certificates client certificates must chain to.
+fn client_roots(path: &str) -> Result<RootCertStore> {
+    let mut roots = RootCertStore::empty();
+    for der in pem_certificates(path, "client CA")? {
+        roots
+            .add(CertificateDer::from(der))
+            .map_err(|err| eyre!("client CA '{path}': {err}"))?;
     }
     Ok(roots)
+}
+
+/// CA certificates to verify a backend against, instead of the system's.
+pub fn load_upstream_ca(path: &str) -> Result<Arc<CaType>> {
+    let certs = pem_certificates(path, "upstream CA")?
+        .into_iter()
+        .map(|der| WrappedX509::parse(der).map_err(|err| eyre!("upstream CA '{path}': {err}")))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(certs.into())
+}
+
+/// A connection pool key for connections verified against `ca`: a hash of its certificates,
+/// never 0 (the key of peers without a CA of their own).
+pub fn ca_pool_key(ca: &CaType) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for cert in ca {
+        CertificateDer::from(cert).as_ref().hash(&mut hasher);
+    }
+    hasher.finish().max(1)
+}
+
+/// A client certificate (chain) and key to present to backends.
+pub fn load_client_cert(pair: &CertPair) -> Result<Arc<CertKey>> {
+    // Same checks as for served certificates: readable, a key, and the key belongs to it
+    let key = load_pair(pair)?;
+    let (_, private_key) = load_certs_and_key_files(&pair.cert_path, &pair.key_path)
+        .ok()
+        .flatten()
+        .ok_or_else(|| eyre!("failed to read key '{}'", pair.key_path))?;
+    let chain = key.cert.iter().map(|c| c.to_vec()).collect();
+    Ok(Arc::new(CertKey::new(
+        chain,
+        private_key.secret_der().to_vec(),
+    )))
+}
+
+/// Hash of the contents of `paths`, `None` if any can't be read.
+pub fn files_fingerprint<'a>(paths: impl IntoIterator<Item = &'a str>) -> Option<u64> {
+    let mut hasher = DefaultHasher::new();
+    for path in paths {
+        std::fs::read(path).ok()?.hash(&mut hasher);
+    }
+    Some(hasher.finish())
 }
 
 /// The listener's server config, its certificates served by `resolver`.

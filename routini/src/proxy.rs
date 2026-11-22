@@ -946,6 +946,9 @@ impl ProxyHttp for Proxy {
             let mut peer = HttpPeer::new(backend.addr.clone(), true, sni)?;
             peer.options.verify_cert = tls.verify;
             peer.options.verify_hostname = tls.verify;
+            peer.options.ca = tls.ca.clone();
+            peer.group_key = tls.ca_pool_key;
+            peer.client_cert_key = tls.client_cert.clone();
             peer
         } else {
             // The backend carries its own (plain-HTTP) peer as a typed field.

@@ -725,3 +725,183 @@ async fn route_and_backend_metrics_are_exported() {
     assert!(sample(&text, "routini_backend_healthy", &[("route", "/a/*")]).is_none());
     assert!(sample(&text, "routini_backend_healthy", &[("route", "/b/*")]).is_some());
 }
+
+/// An HTTPS backend with a self-signed certificate for `name`. Client certificates are
+/// optional unless `require_client_ca` names a CA PEM; the body says whether one was presented
+/// (`client=yes` / `client=no`). Returns the address and the certificate PEM.
+async fn tls_backend(name: &str, require_client_ca: Option<String>) -> (String, String) {
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_rustls::rustls::{
+        self, RootCertStore,
+        pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
+        server::WebPkiClientVerifier,
+    };
+    let cert = rcgen::generate_simple_self_signed(vec![name.to_string()]).unwrap();
+    let chain = vec![CertificateDer::from(cert.cert.der().to_vec())];
+    let key = PrivateKeyDer::try_from(cert.key_pair.serialize_der()).unwrap();
+    let builder = rustls::ServerConfig::builder();
+    let config = match require_client_ca {
+        Some(ca_pem) => {
+            let mut roots = RootCertStore::empty();
+            for ca in CertificateDer::pem_slice_iter(ca_pem.as_bytes()) {
+                roots.add(ca.unwrap()).unwrap();
+            }
+            let verifier = WebPkiClientVerifier::builder(Arc::new(roots))
+                .allow_unauthenticated()
+                .build()
+                .unwrap();
+            builder.with_client_cert_verifier(verifier)
+        }
+        None => builder.with_no_client_auth(),
+    }
+    .with_single_cert(chain, key)
+    .unwrap();
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let acceptor = acceptor.clone();
+            tokio::spawn(async move {
+                let Ok(mut tls) = acceptor.accept(stream).await else {
+                    return;
+                };
+                let client = tls
+                    .get_ref()
+                    .1
+                    .peer_certificates()
+                    .is_some_and(|c| !c.is_empty());
+                let body = format!("client={}", if client { "yes" } else { "no" });
+                // Keep-alive, so the proxy pools the connection
+                let mut buf = [0; 4096];
+                let mut request = Vec::new();
+                loop {
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match tls.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => request.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    request.clear();
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{body}",
+                        body.len()
+                    );
+                    if tls.write_all(response.as_bytes()).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    (address, cert.cert.pem())
+}
+
+#[tokio::test]
+async fn upstream_certificate_verification_can_be_turned_off() {
+    let (backend, _) = tls_backend("backend.internal", None).await;
+    let ports = Ports::new();
+    let routes = route(
+        "/a/*",
+        &[&backend],
+        "[proxy.router.upstream_tls]\nenabled = true\nsni = \"backend.internal\"\nverify = false",
+        "",
+    );
+    let app = ReloadApp::start(config(&ports, "", &routes), None).await;
+    assert_eq!(
+        app.get("/a/x").await,
+        (StatusCode::OK, "client=no".to_string())
+    );
+}
+
+#[tokio::test]
+async fn backends_can_be_verified_against_a_private_ca() {
+    let (backend, backend_cert) = tls_backend("backend.internal", None).await;
+    let dir = std::env::temp_dir().join(format!("routini-upstream-ca-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ca = dir.join("ca.pem");
+    std::fs::write(&ca, &backend_cert).unwrap();
+
+    let ports = Ports::new();
+    let tls = "[proxy.router.upstream_tls]\nenabled = true\nsni = \"backend.internal\"";
+    let routes = route(
+        "/a/*",
+        &[&backend],
+        &format!("{tls}\nca_path = \"{}\"", ca.display()),
+        "",
+    ) + &route("/system/*", &[&backend], tls, "");
+    let config_for = || config(&ports, "", &routes);
+    let app = ReloadApp::start(config_for(), None).await;
+
+    assert_eq!(
+        app.get("/a/x").await,
+        (StatusCode::OK, "client=no".to_string())
+    );
+    // Same backend and SNI: the connection /a/* just pooled was verified against its CA only
+    // and must not be handed to a route trusting the system CAs
+    assert_eq!(
+        app.get("/system/x").await.0,
+        StatusCode::BAD_GATEWAY,
+        "not a public CA"
+    );
+
+    // A CA file replaced on disk is picked up by a reload of the same config
+    let report = app.manager.reload(config_for()).await.unwrap();
+    assert!(!report.updated.contains(&"/a/*".to_string()), "{report:?}");
+    let other = rcgen::generate_simple_self_signed(vec!["other".to_string()]).unwrap();
+    std::fs::write(&ca, other.cert.pem()).unwrap();
+    let report = app.manager.reload(config_for()).await.unwrap();
+    assert!(report.updated.contains(&"/a/*".to_string()), "{report:?}");
+    assert_eq!(
+        app.get("/a/x").await.0,
+        StatusCode::BAD_GATEWAY,
+        "now the wrong CA"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_client_certificate_is_presented_to_backends() {
+    use rcgen::{BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair};
+    let ca_key = KeyPair::generate().unwrap();
+    let mut ca_params = CertificateParams::new(vec![]).unwrap();
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    let ca = ca_params.self_signed(&ca_key).unwrap();
+    let client_key = KeyPair::generate().unwrap();
+    let mut client_params = CertificateParams::new(vec!["routini".to_string()]).unwrap();
+    client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    let client = client_params.signed_by(&client_key, &ca, &ca_key).unwrap();
+
+    let dir = std::env::temp_dir().join(format!("routini-upstream-mtls-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("client.pem"), client.pem()).unwrap();
+    std::fs::write(dir.join("client.key"), client_key.serialize_pem()).unwrap();
+
+    let (backend, _) = tls_backend("backend.internal", Some(ca.pem())).await;
+    let ports = Ports::new();
+    let tls =
+        "[proxy.router.upstream_tls]\nenabled = true\nsni = \"backend.internal\"\nverify = false";
+    let routes = route(
+        "/a/*",
+        &[&backend],
+        &format!(
+            "{tls}\nclient_cert_path = \"{}\"\nclient_key_path = \"{}\"",
+            dir.join("client.pem").display(),
+            dir.join("client.key").display()
+        ),
+        "",
+    ) + &route("/anonymous/*", &[&backend], tls, "");
+    let app = ReloadApp::start(config(&ports, "", &routes), None).await;
+
+    assert_eq!(
+        app.get("/a/x").await,
+        (StatusCode::OK, "client=yes".to_string())
+    );
+    assert_eq!(
+        app.get("/anonymous/x").await,
+        (StatusCode::OK, "client=no".to_string())
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

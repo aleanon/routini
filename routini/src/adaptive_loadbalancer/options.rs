@@ -82,6 +82,10 @@ pub struct HttpProbe {
 pub struct ProbeTls {
     pub sni: String,
     pub verify: bool,
+    /// CA certificates to verify the backend against, as for proxied requests.
+    pub ca_path: Option<String>,
+    /// Client certificate to present, as for proxied requests.
+    pub client_cert: Option<crate::tls::CertPair>,
 }
 
 /// The part of a request the hash strategies select a backend with, so requests with the same

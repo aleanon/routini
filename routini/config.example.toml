@@ -60,6 +60,17 @@ strip_prefix = true
 # retry_on_status = [502, 503, 504]
 # retry_non_idempotent = false
 
+# HTTPS to the backends (nginx proxy_pass https:// and proxy_ssl_*). CA and client
+# certificate files are re-read on reload when they change.
+# [proxy.router.upstream_tls]
+# enabled = true
+# sni = "api.internal"
+# verify = true                        # certificate and hostname
+# ca_path = "certs/internal-ca.pem"    # instead of the system's CAs
+# client_cert_path = "certs/routini.pem"   # present a client certificate (mTLS)
+# client_key_path = "certs/routini.key"
+# h2 = false
+
 # [proxy.router.access]
 # allow = ["10.0.0.0/8"]
 # deny = ["10.1.2.3"]

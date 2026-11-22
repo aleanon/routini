@@ -16,6 +16,7 @@ use http::{HeaderName, HeaderValue, header};
 use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::prelude::HttpPeer;
 use pingora::protocols::l4::socket::SocketAddr;
+use pingora::{protocols::tls::CaType, utils::tls::CertKey};
 use pingora_limits::inflight::{Guard, Inflight};
 
 use crate::{
@@ -172,6 +173,19 @@ pub struct UpstreamTls {
     pub verify: bool,
     /// Negotiate HTTP/2 to the upstream (required for gRPC). Over TLS this is via ALPN.
     pub h2: bool,
+    /// Verify the upstream against these CAs instead of the system's (nginx
+    /// `proxy_ssl_trusted_certificate`).
+    pub ca: Option<Arc<CaType>>,
+    /// Present this client certificate (nginx `proxy_ssl_certificate`).
+    pub client_cert: Option<Arc<CertKey>>,
+    /// Hash of the CA and client certificate files as loaded, so a reload picks up renewed
+    /// files even if the config didn't change.
+    pub files_fingerprint: Option<u64>,
+    /// Hash of the `ca` certificates. Pingora's connection pool key covers the client
+    /// certificate and verify flags but not the CA, so this goes into the peer's group key:
+    /// a connection verified against one CA is never reused where another (or the system's)
+    /// is trusted, nor after the CA changed.
+    pub ca_pool_key: u64,
 }
 
 impl Default for UpstreamTls {
@@ -181,6 +195,10 @@ impl Default for UpstreamTls {
             sni: None,
             verify: true,
             h2: false,
+            ca: None,
+            client_cert: None,
+            files_fingerprint: None,
+            ca_pool_key: 0,
         }
     }
 }

@@ -159,6 +159,10 @@ LOG_JSON=1 cargo run
 - `CertResolver` (`ArcSwap<CertStore>`): default cert + `proxy.tls.certificates` picked by SNI
   (SAN names, `*.` wildcards); reload swaps the store. `min_version`, `client_ca_path` (mTLS)
   and `enable_h2` are fixed for the listener's lifetime. `tls::check` validates everything first
+- Upstream TLS (`route::UpstreamTls`): `ca_path`, client cert/key loaded into the `HttpPeer`
+  (pingora's rustls connector builds a per-peer config for them and for `verify = false`).
+  The CA's hash is the peer's `group_key`, as the pool key leaves the CA out. Files are
+  fingerprinted for reload
 
 **Process Lifecycle** (`routini/src/shutdown.rs`, `routini/src/main.rs`)
 - SIGTERM / first SIGINT: graceful drain (5s + 5s defaults); second signal forces exit (130)

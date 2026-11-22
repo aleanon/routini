@@ -54,6 +54,25 @@ fn build_health_check(
                 peer.sni = tls.sni.clone();
                 peer.options.verify_cert = tls.verify;
                 peer.options.verify_hostname = tls.verify;
+                // Loaded and checked when the config was validated
+                match tls
+                    .ca_path
+                    .as_deref()
+                    .map(crate::tls::load_upstream_ca)
+                    .transpose()
+                {
+                    Ok(ca) => peer.options.ca = ca,
+                    Err(err) => tracing::error!("health check: {err:#}"),
+                }
+                match tls
+                    .client_cert
+                    .as_ref()
+                    .map(crate::tls::load_client_cert)
+                    .transpose()
+                {
+                    Ok(cert) => peer.client_cert_key = cert,
+                    Err(err) => tracing::error!("health check: {err:#}"),
+                }
             }
             let expected = probe.expected_status.clone();
             check.validator = Some(Box::new(move |resp| {

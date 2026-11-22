@@ -114,6 +114,21 @@ impl Config {
     /// Make relative TLS file paths relative to `config_dir` (the config file's directory), so
     /// they don't depend on the working directory routini is started from.
     pub fn resolve_paths(&mut self, config_dir: &std::path::Path) {
+        for route in &mut self.proxy.router {
+            let tls = &mut route.upstream_tls;
+            for path in [
+                &mut tls.ca_path,
+                &mut tls.client_cert_path,
+                &mut tls.client_key_path,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if std::path::Path::new(path.as_str()).is_relative() {
+                    *path = config_dir.join(&*path).to_string_lossy().into_owned();
+                }
+            }
+        }
         if let Some(tls) = &mut self.proxy.tls {
             let paths = [&mut tls.cert_path, &mut tls.key_path]
                 .into_iter()
@@ -788,7 +803,7 @@ impl RouteEntry {
             retry: self.retry.to_retry(),
             passive_health: self.passive_health.to_config(),
             max_body_size: self.max_body_size,
-            upstream_tls: self.upstream_tls.to_upstream_tls(),
+            upstream_tls: self.upstream_tls.to_upstream_tls()?,
             hsts: self.hsts.clone(),
             rate_limit: self.rate_limit_rps.map(|rps| RateLimit {
                 rps,
@@ -992,16 +1007,59 @@ pub struct UpstreamTlsInput {
     /// Negotiate HTTP/2 to the upstream (required for gRPC).
     #[serde(default)]
     pub h2: bool,
+    /// PEM CA certificates to verify backends against instead of the system's (nginx
+    /// `proxy_ssl_trusted_certificate`).
+    pub ca_path: Option<String>,
+    /// Client certificate (chain) and key to present to backends (nginx
+    /// `proxy_ssl_certificate` / `proxy_ssl_certificate_key`).
+    pub client_cert_path: Option<String>,
+    pub client_key_path: Option<String>,
 }
 
 impl UpstreamTlsInput {
-    fn to_upstream_tls(&self) -> UpstreamTls {
-        UpstreamTls {
+    /// The client certificate pair, if both files are set.
+    pub fn client_pair(&self) -> Result<Option<CertPair>> {
+        match (&self.client_cert_path, &self.client_key_path) {
+            (Some(cert), Some(key)) => Ok(Some(CertPair {
+                cert_path: cert.clone(),
+                key_path: key.clone(),
+            })),
+            (None, None) => Ok(None),
+            _ => Err(eyre!(
+                "upstream_tls: client_cert_path and client_key_path go together"
+            )),
+        }
+    }
+
+    fn file_paths(&self) -> impl Iterator<Item = &str> {
+        [&self.ca_path, &self.client_cert_path, &self.client_key_path]
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+    }
+
+    fn to_upstream_tls(&self) -> Result<UpstreamTls> {
+        let client = self.client_pair()?;
+        let ca = self
+            .ca_path
+            .as_deref()
+            .map(tls::load_upstream_ca)
+            .transpose()?;
+        if !self.enabled && (self.ca_path.is_some() || client.is_some()) {
+            return Err(eyre!(
+                "upstream_tls: ca_path and client certificates need enabled = true"
+            ));
+        }
+        Ok(UpstreamTls {
             enabled: self.enabled,
             sni: self.sni.clone(),
             verify: self.verify.unwrap_or(true),
             h2: self.h2,
-        }
+            ca_pool_key: ca.as_deref().map_or(0, tls::ca_pool_key),
+            ca,
+            client_cert: client.as_ref().map(tls::load_client_cert).transpose()?,
+            files_fingerprint: tls::files_fingerprint(self.file_paths()),
+        })
     }
 }
 
@@ -1208,10 +1266,15 @@ impl HealthCheckInput {
                     .or_else(|| upstream_tls.sni.clone())
                     .unwrap_or_else(|| "localhost".to_string());
                 HeaderValue::from_str(&host).wrap_err_with(|| format!("invalid host '{host}'"))?;
-                let tls = upstream_tls.enabled.then(|| ProbeTls {
-                    sni: upstream_tls.sni.clone().unwrap_or_else(|| host.clone()),
-                    verify: upstream_tls.verify.unwrap_or(true),
-                });
+                let tls = match upstream_tls.enabled {
+                    true => Some(ProbeTls {
+                        sni: upstream_tls.sni.clone().unwrap_or_else(|| host.clone()),
+                        verify: upstream_tls.verify.unwrap_or(true),
+                        ca_path: upstream_tls.ca_path.clone(),
+                        client_cert: upstream_tls.client_pair()?,
+                    }),
+                    false => None,
+                };
                 HealthProbe::Http(HttpProbe {
                     path,
                     host,
@@ -1560,6 +1623,44 @@ mod tests {
     }
 
     #[test]
+    fn upstream_tls_files_are_validated() {
+        let with = |tls: &str| {
+            toml(&MINIMAL_TOML.replace(
+                "[[proxy.router.load_balancer.upstreams]]",
+                &format!(
+                    "[proxy.router.upstream_tls]\n{tls}\n[[proxy.router.load_balancer.upstreams]]"
+                ),
+            ))
+        };
+        let dir = crate::tls::test_certs::temp_dir("upstream");
+        let (cert, key) = crate::tls::test_certs::write(&dir);
+        with(&format!(
+            "enabled = true\nca_path = \"{cert}\"\nclient_cert_path = \"{cert}\"\n\
+             client_key_path = \"{key}\""
+        ))
+        .validate()
+        .unwrap();
+        for (tls, expected) in [
+            (
+                format!("enabled = true\nclient_cert_path = \"{cert}\""),
+                "go together",
+            ),
+            (format!("ca_path = \"{cert}\""), "need enabled = true"),
+            (
+                format!("enabled = true\nca_path = \"{key}\""),
+                "contains no certificate",
+            ),
+            (
+                "enabled = true\nca_path = \"/nonexistent.pem\"".to_string(),
+                "failed to read",
+            ),
+        ] {
+            let err = errors_of(&with(&tls));
+            assert!(err.contains(expected), "{tls}: {err}");
+        }
+    }
+
+    #[test]
     fn tls_min_version_is_validated() {
         let dir = crate::tls::test_certs::temp_dir("min-version");
         let (cert, key) = crate::tls::test_certs::write(&dir);
@@ -1629,6 +1730,8 @@ mod tests {
                     tls: Some(ProbeTls {
                         sni: "api.internal".into(),
                         verify: true,
+                        ca_path: None,
+                        client_cert: None,
                     }),
                 }),
                 passes: 1,

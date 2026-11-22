@@ -448,7 +448,14 @@ async fn update_in_place(
             old != *new_entry
         }
         None => true,
-    };
+    } || existing
+        .runtime
+        .state
+        .load()
+        .config
+        .upstream_tls
+        .files_fingerprint
+        != route.route_config.upstream_tls.files_fingerprint;
     if route_settings_changed {
         existing.runtime.reload(route.route_config);
         changed = true;

@@ -2670,6 +2670,7 @@ dependencies = [
  "serde_json",
  "smallvec",
  "tokio",
+ "tokio-rustls",
  "toml",
  "tracing",
  "tracing-appender",
