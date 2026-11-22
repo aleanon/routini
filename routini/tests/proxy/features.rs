@@ -596,3 +596,29 @@ async fn a_slow_client_does_not_get_the_backend_ejected() {
     let (status, body) = app.get("/a/health").await;
     assert_eq!((status, body), (StatusCode::OK, b[0].clone()));
 }
+
+#[tokio::test]
+async fn wildcard_virtual_hosts_serve_any_subdomain() {
+    let b = TestApp::create_backends(2).await.unwrap();
+    let ports = Ports::new();
+    let routes = route("/a/*", &[&b[0]], "host = \"*.example.com\"", "")
+        + &route("/a/*", &[&b[1]], "host = \"www.example.com\"", "");
+    let app = ReloadApp::start(config(&ports, "", &routes), None).await;
+
+    let get = |host: &'static str| app.get_with_host("/a/health", Some(host));
+    assert_eq!(get("api.example.com").await, (StatusCode::OK, b[0].clone()));
+    assert_eq!(
+        get("x.y.example.com:3500").await,
+        (StatusCode::OK, b[0].clone())
+    );
+    assert_eq!(
+        get("www.example.com").await,
+        (StatusCode::OK, b[1].clone()),
+        "exact first"
+    );
+    assert_eq!(
+        get("example.com").await.0,
+        StatusCode::NOT_FOUND,
+        "not the bare domain"
+    );
+}

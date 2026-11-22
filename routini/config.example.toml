@@ -36,6 +36,9 @@ listener = 3500
 [[proxy.router]]
 path = "/api/*"
 strip_prefix = true
+# Virtual host (nginx server_name): "api.example.com", or "*.example.com" for any subdomain
+# (an exact name wins, then the longest wildcard). Without it the route is on the default server.
+# host = "api.example.com"
 
 # Access control, all optional (nginx allow/deny/auth_basic). Users are "user:<bcrypt hash>"
 # as `htpasswd -nB user` prints it (preferred, the password stays out of this file) or

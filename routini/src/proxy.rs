@@ -159,6 +159,34 @@ fn cookie<'a>(req: &'a RequestHeader, name: &str) -> Option<&'a str> {
         .map(|(_, value)| value.trim_matches('"'))
 }
 
+/// The virtual host serving `host` (a Host header or URI authority), with nginx `server_name`
+/// semantics: case-insensitive, port ignored, an exact name before wildcards, and of the
+/// wildcards the longest: for `a.b.example.com`, `*.b.example.com` before `*.example.com`. A
+/// wildcard matches any depth of subdomain but not the bare domain.
+fn find_vhost<'t>(vhosts: &'t HashMap<String, VHost>, host: &str) -> Option<&'t VHost> {
+    let name = match host.strip_prefix('[') {
+        // IPv6 literal, `[::1]:8080`
+        Some(v6) => v6.split(']').next().unwrap_or(v6),
+        None => host.rsplit_once(':').map_or(host, |(name, _)| name),
+    };
+    let name = name.trim_end_matches('.').to_ascii_lowercase();
+    if let Some(vhost) = vhosts.get(&name) {
+        return Some(vhost);
+    }
+    let mut wildcard = String::with_capacity(name.len() + 1);
+    let mut rest = name.as_str();
+    while let Some((_, parent)) = rest.split_once('.') {
+        wildcard.clear();
+        wildcard.push_str("*.");
+        wildcard.push_str(parent);
+        if let Some(vhost) = vhosts.get(&wildcard) {
+            return Some(vhost);
+        }
+        rest = parent;
+    }
+    None
+}
+
 /// Parse the request's `Content-Length`, if present and valid.
 fn content_length(session: &Session) -> Option<usize> {
     session
@@ -188,8 +216,9 @@ pub struct RoutingTable {
     /// request to a path does the matchit lookup and stripping; subsequent requests reuse the
     /// cached `Arc<CachedRoute>` with no allocation. Eviction only bounds memory.
     default_cache: Cache<Box<str>, Arc<CachedRoute>>,
-    /// Name-based virtual hosts, keyed by lowercased host. Empty in the common single-host case,
-    /// in which routing skips host handling entirely and behaves exactly like path-only routing.
+    /// Name-based virtual hosts, keyed by lowercased host or `*.suffix` wildcard. Empty in the
+    /// common single-host case, in which routing skips host handling entirely and behaves
+    /// exactly like path-only routing.
     vhosts: HashMap<String, VHost>,
     /// Regex location routes for the default server, tried in order when matchit finds no match
     /// (nginx `location ~ <regex>`). These forward the full path (no prefix stripping).
@@ -402,14 +431,10 @@ impl Proxy {
     /// single concurrent-map lookup plus an `Arc` clone, identical to path-only routing.
     pub fn resolve(&self, host: Option<&str>, path: &str) -> Result<Arc<CachedRoute>> {
         let table = self.table.load();
-        if !table.vhosts.is_empty() {
-            if let Some(host) = host {
-                // Match nginx server_name semantics: case-insensitive, ignore the port.
-                let key = host.split(':').next().unwrap_or(host).to_ascii_lowercase();
-                if let Some(vhost) = table.vhosts.get(&key) {
-                    return Self::resolve_in(&vhost.router, &[], &vhost.cache, path);
-                }
-            }
+        if !table.vhosts.is_empty()
+            && let Some(vhost) = host.and_then(|host| find_vhost(&table.vhosts, host))
+        {
+            return Self::resolve_in(&vhost.router, &[], &vhost.cache, path);
         }
         Self::resolve_in(
             &table.default_router,
@@ -1495,6 +1520,33 @@ mod tests {
             .resolve(Some("other.example.com"), "/api")
             .expect("default route");
         assert!(r.stripped_path.is_none());
+    }
+
+    #[test]
+    fn wildcard_virtual_hosts_match_like_nginx_server_name() {
+        let router = |path: &str| {
+            let mut router = Router::new();
+            router.insert(path, create_test_route_value(false)).unwrap();
+            router
+        };
+        let mut vhosts = std::collections::HashMap::new();
+        vhosts.insert("www.example.com".to_string(), router("/exact"));
+        vhosts.insert("*.example.com".to_string(), router("/wild"));
+        vhosts.insert("*.eu.example.com".to_string(), router("/eu"));
+        vhosts.insert("::1".to_string(), router("/v6"));
+        let proxy = Proxy::with_vhosts(router("/default"), vhosts, 64);
+        let served = |host: &str, path: &str| proxy.resolve(Some(host), path).is_ok();
+
+        assert!(served("www.example.com", "/exact"), "exact before wildcard");
+        assert!(!served("www.example.com", "/wild"));
+        assert!(served("api.example.com", "/wild"));
+        assert!(
+            served("A.B.Example.COM.:443", "/wild"),
+            "any depth, case, dot, port"
+        );
+        assert!(served("shop.eu.example.com", "/eu"), "longest wildcard");
+        assert!(served("example.com", "/default"), "not the bare domain");
+        assert!(served("[::1]:8080", "/v6"));
     }
 
     #[test]

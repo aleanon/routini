@@ -580,7 +580,9 @@ impl TlsConfig {
 #[serde(deny_unknown_fields)]
 pub struct RouteEntry {
     pub path: String,
-    /// Optional virtual host (nginx `server_name`); routes with no host form the default server.
+    /// Optional virtual host (nginx `server_name`): a name, `*.example.com` (any subdomain, the
+    /// longest wildcard wins, an exact name before any) or an IP. Routes with no host form the
+    /// default server.
     pub host: Option<String>,
     /// Treat `path` as a regex location (default-server only) instead of a matchit prefix.
     #[serde(default)]
@@ -661,6 +663,23 @@ impl RouteEntry {
     fn validate(&self, name: &str, errors: &mut Vec<String>) {
         if let Err(err) = self.to_route() {
             errors.push(format!("{name}: {err:#}"));
+        }
+        if let Some(host) = &self.host {
+            let bare = host.strip_prefix("*.").unwrap_or(host);
+            let valid = !bare.is_empty()
+                && !bare.contains('*')
+                && bare.split('.').all(|label| {
+                    !label.is_empty()
+                        && label
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                });
+            if !valid && host.parse::<IpAddr>().is_err() {
+                errors.push(format!(
+                    "{name}: host '{host}' must be a name like example.com, a wildcard like \
+                     *.example.com, or an IP address"
+                ));
+            }
         }
         if self.load_balancer.upstreams.is_empty() && self.action.is_none() {
             errors.push(format!(
@@ -1408,6 +1427,39 @@ mod tests {
     fn invalid_backend_address_is_an_error_not_a_panic() {
         let config = toml(&MINIMAL_TOML.replace("127.0.0.1:4001", "not-an-address"));
         assert!(errors_of(&config).contains("not-an-address"));
+    }
+
+    #[test]
+    fn virtual_host_names_are_validated() {
+        let with_host = |host: &str| {
+            toml(&MINIMAL_TOML.replace(
+                "path = \"/api/*\"",
+                &format!("path = \"/api/*\"\nhost = \"{host}\""),
+            ))
+        };
+        for good in [
+            "example.com",
+            "*.example.com",
+            "localhost",
+            "10.0.0.1",
+            "::1",
+        ] {
+            with_host(good).validate().unwrap();
+        }
+        for bad in [
+            "*",
+            "*.",
+            "www.*.com",
+            "example.*",
+            "a..b",
+            "a b.com",
+            "*example.com",
+        ] {
+            assert!(
+                errors_of(&with_host(bad)).contains("must be a name"),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

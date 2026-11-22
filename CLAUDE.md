@@ -117,6 +117,7 @@ LOG_JSON=1 cargo run
 - `RouteRuntime`: a route's load balancer plus its `RouteState` behind an `ArcSwap`
 
 **Proxy Layer** (`routini/src/proxy.rs`)
+- Virtual hosts: exact name, then longest `*.suffix` wildcard (`find_vhost`, nginx semantics)
 - `RoutingTable` (default router, vhost routers, regex routes, per-path lookup caches) behind
   an `ArcSwap`; config reload replaces it whole, so caches never outlive their config
 - Filters implement the route features; latency/connection metrics recorded per backend
