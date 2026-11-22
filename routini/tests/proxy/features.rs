@@ -622,3 +622,106 @@ async fn wildcard_virtual_hosts_serve_any_subdomain() {
         "not the bare domain"
     );
 }
+
+/// The value of the sample of `name` with all of `labels`, from Prometheus text output.
+fn sample(text: &str, name: &str, labels: &[(&str, &str)]) -> Option<f64> {
+    text.lines()
+        .filter(|l| !l.starts_with('#'))
+        .filter(|l| l.split(['{', ' ']).next() == Some(name))
+        .find(|l| {
+            labels
+                .iter()
+                .all(|(k, v)| l.contains(&format!("{k}=\"{v}\"")))
+        })
+        .and_then(|l| l.rsplit(' ').next()?.parse().ok())
+}
+
+#[tokio::test]
+async fn route_and_backend_metrics_are_exported() {
+    let b = TestApp::create_backends(1).await.unwrap();
+    let down = scripted_backend(Some(UNAVAILABLE)).await;
+    let ports = Ports::new();
+    let routes = route(
+        "/a/*",
+        &[&b[0], &down],
+        "[proxy.router.retry]\nretry_on_status = [503]",
+        "strategy = \"RoundRobin\"",
+    ) + &route("/b/*", &[&b[0]], "", "");
+    let app = ReloadApp::start(config(&ports, "", &routes), None).await;
+    let scrape = || async {
+        reqwest::get(format!("http://127.0.0.1:{}/", ports.prometheus))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap()
+    };
+
+    assert_eq!(
+        statuses(&app, reqwest::Method::GET, "/a/health", 4).await,
+        [200; 4]
+    );
+    assert_eq!(app.get("/nowhere").await.0, StatusCode::NOT_FOUND);
+    let text = scrape().await;
+
+    let requests = |route, status| {
+        sample(
+            &text,
+            "routini_requests_total",
+            &[("route", route), ("status", status)],
+        )
+    };
+    assert_eq!(requests("/a/*", "200"), Some(4.0), "{text}");
+    // The startup probe (GET /) is unmatched too
+    assert!(requests("-", "404").is_some_and(|n| n >= 1.0), "{text}");
+    assert_eq!(
+        sample(
+            &text,
+            "routini_request_duration_seconds_count",
+            &[("route", "/a/*")]
+        ),
+        Some(4.0)
+    );
+    // Round robin over two backends: the 503 one was hit and retried
+    let failures = sample(
+        &text,
+        "routini_upstream_failures_total",
+        &[("route", "/a/*"), ("backend", &down), ("kind", "status")],
+    );
+    assert!(failures.is_some_and(|n| n >= 1.0), "{text}");
+    assert!(
+        sample(
+            &text,
+            "routini_upstream_response_seconds_count",
+            &[("route", "/a/*"), ("backend", &b[0])]
+        )
+        .is_some_and(|n| n >= 2.0)
+    );
+    let backend = [("route", "/a/*"), ("backend", b[0].as_str())];
+    assert_eq!(
+        sample(&text, "routini_backend_healthy", &backend),
+        Some(1.0)
+    );
+    assert_eq!(
+        sample(&text, "routini_backend_active_connections", &backend),
+        Some(0.0)
+    );
+    assert!(sample(&text, "routini_backend_latency_ewma_seconds", &backend).is_some());
+    assert_eq!(
+        sample(
+            &text,
+            "routini_route_strategy",
+            &[("route", "/a/*"), ("strategy", "RoundRobin")]
+        ),
+        Some(1.0)
+    );
+
+    // A route removed by a reload stops being reported
+    app.manager
+        .reload(config(&ports, "", &route("/b/*", &[&b[0]], "", "")))
+        .await
+        .unwrap();
+    let text = scrape().await;
+    assert!(sample(&text, "routini_backend_healthy", &[("route", "/a/*")]).is_none());
+    assert!(sample(&text, "routini_backend_healthy", &[("route", "/b/*")]).is_some());
+}

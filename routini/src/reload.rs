@@ -96,9 +96,10 @@ impl ManagedRoute {
             Some(route.lb_options),
             decision_engine,
         ));
+        let name = display_key(&key);
         Self {
             key,
-            runtime: Arc::new(RouteRuntime::new(lb, route.route_config)),
+            runtime: Arc::new(RouteRuntime::new(name, lb, route.route_config)),
             discovery: route.discovery,
             configured_strategy,
             task: None,
@@ -496,7 +497,8 @@ fn build_table(routes: &[ManagedRoute]) -> Result<RoutingTable> {
         default_regex,
         vhosts,
         DEFAULT_PATH_CACHE_CAPACITY,
-    ))
+    )
+    .with_routes(routes.iter().map(|r| r.runtime.clone()).collect()))
 }
 
 #[async_trait]

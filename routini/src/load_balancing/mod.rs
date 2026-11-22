@@ -472,6 +472,14 @@ where
         self.strategy.read().await.clone()
     }
 
+    /// [Self::current_strategy] without waiting: `None` while a strategy switch holds the lock.
+    pub fn try_current_strategy(&self) -> Option<S>
+    where
+        S: Clone,
+    {
+        self.strategy.try_read().ok().map(|s| s.clone())
+    }
+
     pub async fn rebuild_selector(&self) {
         let strategy = self.strategy.read().await;
         self.selector.store(

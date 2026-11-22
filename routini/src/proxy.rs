@@ -30,6 +30,7 @@ use std::collections::HashMap;
 use crate::{
     adaptive_loadbalancer::{AdaptiveBackend, options::HashKey},
     load_balancing::Metrics,
+    metrics,
     rate_limit::Decision,
     real_ip::RealIp,
     route::{RouteAction, RouteRuntime, RouteState},
@@ -223,6 +224,8 @@ pub struct RoutingTable {
     /// Regex location routes for the default server, tried in order when matchit finds no match
     /// (nginx `location ~ <regex>`). These forward the full path (no prefix stripping).
     default_regex: Vec<(Regex, RouteValue)>,
+    /// Every route in the table, for metrics.
+    routes: Vec<Arc<RouteRuntime>>,
 }
 
 impl RoutingTable {
@@ -250,7 +253,18 @@ impl RoutingTable {
             default_cache: Cache::new(capacity),
             vhosts,
             default_regex,
+            routes: Vec::new(),
         }
+    }
+
+    /// List the table's routes, for metrics.
+    pub fn with_routes(mut self, routes: Vec<Arc<RouteRuntime>>) -> Self {
+        self.routes = routes;
+        self
+    }
+
+    pub fn routes(&self) -> &[Arc<RouteRuntime>] {
+        &self.routes
     }
 }
 
@@ -351,8 +365,10 @@ impl Proxy {
     }
 
     pub fn with_table(table: RoutingTable) -> Self {
+        let table = Arc::new(ArcSwap::from_pointee(table));
+        crate::metrics::watch(&table);
         Proxy {
-            table: Arc::new(ArcSwap::from_pointee(table)),
+            table,
             access_log: true,
             https_redirect: false,
             https_port: 443,
@@ -1012,6 +1028,7 @@ impl ProxyHttp for Proxy {
                 && retry.may_resend(&session.req_header().method)
                 && !session.as_ref().retry_buffer_truncated()
             {
+                metrics::upstream_failure(&route.runtime.name, &backend.addr.to_string(), "status");
                 if state.health.record_failure(backend) {
                     route.runtime.lb.set_backend_enabled(backend, false);
                     log::warn!("Passively ejected backend {}", backend.addr);
@@ -1032,6 +1049,9 @@ impl ProxyHttp for Proxy {
                 backend
                     .metrics
                     .record_latency(latency, route.runtime.lb.config().latency_smoothing_factor);
+                metrics::UPSTREAM_RESPONSE
+                    .with_label_values(&[&*route.runtime.name, &backend.addr.to_string()])
+                    .observe(latency.as_secs_f64());
             }
         }
         Ok(())
@@ -1049,6 +1069,11 @@ impl ProxyHttp for Proxy {
     ) -> Box<Error> {
         if let (Some(route), Some(state)) = (&ctx.route, &ctx.state) {
             if let Some(backend) = &ctx.backend {
+                metrics::upstream_failure(
+                    &route.runtime.name,
+                    &backend.addr.to_string(),
+                    "connect",
+                );
                 if state.health.record_failure(backend) {
                     route.runtime.lb.set_backend_enabled(backend, false);
                     log::warn!("Passively ejected backend {}", backend.addr);
@@ -1075,6 +1100,17 @@ impl ProxyHttp for Proxy {
         client_reused: bool,
     ) -> Box<Error> {
         let mut e = e.more_context(format!("Peer: {peer}"));
+        // The backend's failures (a status retry is counted where it is decided)
+        if *e.esource() == ErrorSource::Upstream
+            && !matches!(e.etype(), ErrorType::HTTPStatus(_))
+            && let (Some(route), Some(backend)) = (&ctx.route, &ctx.backend)
+        {
+            let kind = match e.etype() {
+                ErrorType::ReadTimedout | ErrorType::WriteTimedout => "timeout",
+                _ => "error",
+            };
+            metrics::upstream_failure(&route.runtime.name, &backend.addr.to_string(), kind);
+        }
         let replayable =
             session.response_written().is_none() && !session.as_ref().retry_buffer_truncated();
         if !replayable {
@@ -1183,14 +1219,27 @@ impl ProxyHttp for Proxy {
 
     /// Emit a structured access-log record once the request completes.
     async fn logging(&self, session: &mut Session, e: Option<&Error>, ctx: &mut Self::CTX) {
-        if !self.access_log {
-            return;
-        }
-
         let status = session
             .response_written()
             .map(|r| r.status.as_u16())
             .unwrap_or(0);
+
+        let route = ctx
+            .route
+            .as_ref()
+            .map_or(metrics::NO_ROUTE, |r| &*r.runtime.name);
+        let code = StatusCode::from_u16(status).ok();
+        let status_label = code.as_ref().map_or("0", StatusCode::as_str);
+        metrics::REQUESTS
+            .with_label_values(&[route, status_label])
+            .inc();
+        metrics::REQUEST_DURATION
+            .with_label_values(&[route])
+            .observe(ctx.request_start.elapsed().as_secs_f64());
+
+        if !self.access_log {
+            return;
+        }
         let latency_ms = ctx.request_start.elapsed().as_millis();
         let bytes_sent = session.body_bytes_sent();
         let method = session.req_header().method.clone();
@@ -1285,7 +1334,7 @@ mod tests {
             ..Default::default()
         };
         RouteValue {
-            runtime: Arc::new(RouteRuntime::new(Arc::new(lb), config)),
+            runtime: Arc::new(RouteRuntime::new("/test", Arc::new(lb), config)),
         }
     }
 

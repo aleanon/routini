@@ -495,13 +495,16 @@ impl RouteState {
 /// is fixed for the process lifetime; `state` is read lock-free per request and can be replaced on
 /// SIGHUP config reload via [`RouteRuntime::reload`].
 pub struct RouteRuntime {
+    /// The route as written in the config, e.g. `api.example.com/v1/*`, for metrics and logs.
+    pub name: Arc<str>,
     pub lb: SharedLb,
     pub state: arc_swap::ArcSwap<RouteState>,
 }
 
 impl RouteRuntime {
-    pub fn new(lb: SharedLb, config: RouteConfig) -> Self {
+    pub fn new(name: impl Into<Arc<str>>, lb: SharedLb, config: RouteConfig) -> Self {
         Self {
+            name: name.into(),
             lb,
             state: arc_swap::ArcSwap::from_pointee(RouteState::new(config)),
         }

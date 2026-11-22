@@ -178,6 +178,16 @@ impl<D: DecisionEngine> AdaptiveLoadBalancer<D> {
         self.lb.backends().set_enable(backend, enabled);
     }
 
+    /// Whether `backend` is healthy and enabled, i.e. selectable.
+    pub fn backend_ready(&self, backend: &AdaptiveBackend) -> bool {
+        self.lb.backends().ready(backend)
+    }
+
+    /// [Self::current_strategy] without waiting, `None` while a switch is in progress.
+    pub fn try_current_strategy(&self) -> Option<Adaptive> {
+        self.lb.try_current_strategy()
+    }
+
     /// The strategy the load balancer is currently selecting backends with.
     pub async fn current_strategy(&self) -> Adaptive {
         self.lb.current_strategy().await

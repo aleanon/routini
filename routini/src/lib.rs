@@ -2,6 +2,7 @@ pub mod adaptive_loadbalancer;
 pub mod basic_auth;
 pub mod config;
 pub mod load_balancing;
+pub mod metrics;
 pub mod proxy;
 pub mod rate_limit;
 pub mod real_ip;
