@@ -28,7 +28,7 @@ use crate::{
         AccessControl, CacheConfig, HeaderRules, HostRewrite, PassiveHealthConfig, RetryConfig,
         RouteAction, RouteConfig, TimeoutConfig, UpstreamTls,
     },
-    server_builder::{Route, ServerBuilder, TlsConfig as BuilderTlsConfig},
+    server_builder::{ListenerLimits, Route, ServerBuilder, TlsConfig as BuilderTlsConfig},
     tls::{self, CertPair, TlsOptions, TlsVersion},
     utils::{
         config_loader::ConfigFormat,
@@ -247,6 +247,25 @@ impl Config {
                 errors.push(format!("server.{field} must be greater than 0"));
             }
         }
+        if let Some(limits) = &self.server.listener_limits {
+            for (field, zero) in [
+                ("max_connections", limits.max_connections == Some(0)),
+                (
+                    "max_pending_handshakes",
+                    limits.max_pending_handshakes == Some(0),
+                ),
+                (
+                    "handshake_timeout_secs",
+                    limits.handshake_timeout_secs == Some(0),
+                ),
+            ] {
+                if zero {
+                    errors.push(format!(
+                        "server.listener_limits.{field} must be greater than 0"
+                    ));
+                }
+            }
+        }
         if self.server.worker_threads == Some(0) {
             errors.push("server.worker_threads must be greater than 0".to_string());
         }
@@ -343,6 +362,9 @@ impl Config {
             builder = builder.real_ip(real_ip.to_real_ip()?);
         }
         builder = builder.client_timeouts(server.client_timeouts());
+        if let Some(limits) = &server.listener_limits {
+            builder = builder.listener_limits(limits.to_limits());
+        }
         if let Some(tls) = &self.proxy.tls {
             builder = builder.tls(tls.to_builder_tls()?);
         }
@@ -441,6 +463,8 @@ pub struct ServerConfig {
     /// Longest wait for a client to take more of the response (nginx `send_timeout`).
     /// Default 60.
     pub send_timeout_secs: Option<u64>,
+    /// Limits on the connections each proxy listener accepts.
+    pub listener_limits: Option<ListenerLimitsInput>,
 }
 
 impl ServerConfig {
@@ -456,6 +480,33 @@ impl ServerConfig {
             t.send = Duration::from_secs(secs);
         }
         t
+    }
+}
+
+/// See [ListenerLimits]. Fixed for the process lifetime (a reload reports it as needing a
+/// restart).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListenerLimitsInput {
+    pub max_connections: Option<usize>,
+    pub max_pending_handshakes: Option<usize>,
+    pub handshake_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub skip_closed_peers: bool,
+}
+
+impl ListenerLimitsInput {
+    pub fn to_limits(&self) -> ListenerLimits {
+        let mut limits = ListenerLimits {
+            max_connections: self.max_connections,
+            max_pending_handshakes: self.max_pending_handshakes,
+            skip_closed_peers: self.skip_closed_peers,
+            ..ListenerLimits::default()
+        };
+        if let Some(secs) = self.handshake_timeout_secs {
+            limits.handshake_timeout = Duration::from_secs(secs);
+        }
+        limits
     }
 }
 
@@ -1783,6 +1834,28 @@ mod tests {
 
         let config = toml(&format!("[server]\nsend_timeout_secs = 0\n{MINIMAL_TOML}"));
         assert!(errors_of(&config).contains("send_timeout_secs must be greater than 0"));
+    }
+
+    #[test]
+    fn listener_limits_are_parsed_and_validated() {
+        let config = toml(&format!(
+            "[server]\nlistener_limits = {{ max_connections = 100, handshake_timeout_secs = 5 }}\n\
+             {MINIMAL_TOML}"
+        ));
+        config.validate().unwrap();
+        let limits = config.server.listener_limits.unwrap().to_limits();
+        assert_eq!(limits.max_connections, Some(100));
+        assert_eq!(limits.max_pending_handshakes, None);
+        assert_eq!(limits.handshake_timeout, Duration::from_secs(5));
+        assert!(!limits.skip_closed_peers);
+
+        let config = toml(&format!(
+            "[server]\nlistener_limits = {{ max_pending_handshakes = 0 }}\n{MINIMAL_TOML}"
+        ));
+        assert!(
+            errors_of(&config)
+                .contains("server.listener_limits.max_pending_handshakes must be greater than 0")
+        );
     }
 
     #[test]

@@ -16,6 +16,15 @@ prometheus_address = "0.0.0.0:9000"
 # client_body_timeout_secs = 60
 # send_timeout_secs = 60
 
+# Limits on the connections each proxy listener (plain, TLS) accepts. Over a limit a new
+# connection is closed right after accept. Needs a restart to change.
+# max_connections: open connections (nginx worker_connections); keep the sum of both listeners
+#   below the process's file descriptor limit
+# max_pending_handshakes: unfinished TLS handshakes, size it to what the server can finish in
+#   handshake_timeout_secs (default 60)
+# skip_closed_peers: don't start the handshake of a client that already gave up (Linux)
+# listener_limits = { max_connections = 10000, max_pending_handshakes = 1000, handshake_timeout_secs = 10, skip_closed_peers = true }
+
 [proxy]
 # A port (bound on all interfaces) or "host:port". Env override: SERVER_ADDRESS
 listener = 3500

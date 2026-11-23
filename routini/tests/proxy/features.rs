@@ -905,3 +905,85 @@ async fn a_client_certificate_is_presented_to_backends() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `GET path` on a fresh connection, closed after the response: the status line, or `None` if
+/// the proxy closed the connection without answering.
+async fn raw_get(port: u16, path: &str) -> Option<String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .ok()?;
+    let request = format!("GET {path} HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).await.ok()?;
+    let mut response = Vec::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        stream.read_to_end(&mut response),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    let response = String::from_utf8_lossy(&response);
+    response.lines().next().map(str::to_string)
+}
+
+#[tokio::test]
+async fn connections_over_the_listener_limit_are_closed() {
+    let b = TestApp::create_backends(1).await.unwrap();
+    let ports = Ports::new();
+    let routes = route("/a/*", &[&b[0]], "", "");
+    let app = ReloadApp::start(
+        config(
+            &ports,
+            "keepalive_timeout_secs = 0\nlistener_limits = { max_connections = 1 }",
+            &routes,
+        ),
+        None,
+    )
+    .await;
+    let metric = |name: &'static str, labels: &'static [(&'static str, &'static str)]| async move {
+        let text = reqwest::get(format!("http://127.0.0.1:{}/", ports.prometheus))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        sample(&text, name, labels)
+    };
+    let open = || metric("routini_listener_open_connections", &[("listener", "http")]);
+
+    // An idle client takes the only slot, once the startup probe's connection is gone
+    let idle = tokio::net::TcpStream::connect(("127.0.0.1", ports.listen))
+        .await
+        .unwrap();
+    let mut counted = false;
+    for _ in 0..50 {
+        if open().await == Some(1.0) {
+            counted = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(counted, "open connections: {:?}", open().await);
+
+    assert_eq!(raw_get(ports.listen, "/a/health").await, None);
+    let closed = metric(
+        "routini_listener_closed_total",
+        &[("listener", "http"), ("reason", "connection_limit")],
+    )
+    .await;
+    assert!(closed.is_some_and(|n| n >= 1.0), "{closed:?}");
+
+    // Its slot frees up when it leaves
+    drop(idle);
+    let mut served = None;
+    for _ in 0..50 {
+        served = raw_get(ports.listen, "/a/health").await;
+        if served.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(served.as_deref(), Some("HTTP/1.1 200 OK"));
+    drop(app);
+}

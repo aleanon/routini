@@ -9,7 +9,9 @@ use std::{
 
 use color_eyre::eyre::{Result, eyre};
 use pingora::{
-    listeners::tls::TlsSettings,
+    listeners::{
+        AcceptLimits, AcceptStats, DEFAULT_HANDSHAKE_TIMEOUT, ListenerConfig, tls::TlsSettings,
+    },
     prelude::background_service,
     proxy::http_proxy_service,
     server::{
@@ -40,6 +42,47 @@ use crate::{
 // Re-export so existing `server_builder::RouteConfig` references keep working; the canonical
 // definition now lives in `crate::route` alongside the rest of the per-route runtime config.
 pub use crate::route::RouteConfig;
+
+/// Limits on the connections each proxy listener (plain and TLS, counted separately) accepts.
+/// Connections over a limit are closed right after `accept`, before any work is done for them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ListenerLimits {
+    /// Open connections per listener (nginx `worker_connections`). Default: no limit.
+    pub max_connections: Option<usize>,
+    /// Connections per listener whose TLS handshake hasn't finished. Default: no limit.
+    pub max_pending_handshakes: Option<usize>,
+    /// Longest a TLS handshake may take, including any wait for a handshake thread. Default 60s.
+    pub handshake_timeout: Duration,
+    /// Close a connection its client already closed or reset instead of starting its handshake
+    /// (Linux). Default: off.
+    pub skip_closed_peers: bool,
+}
+
+impl Default for ListenerLimits {
+    fn default() -> Self {
+        Self {
+            max_connections: None,
+            max_pending_handshakes: None,
+            handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
+            skip_closed_peers: false,
+        }
+    }
+}
+
+impl ListenerLimits {
+    /// The limits for one listener, counting into a fresh [AcceptStats] exported as `listener`.
+    fn for_listener(&self, listener: &'static str) -> AcceptLimits {
+        let stats = Arc::new(AcceptStats::default());
+        crate::metrics::watch_listener(listener, &stats);
+        AcceptLimits {
+            handshake_timeout: self.handshake_timeout,
+            max_connections: self.max_connections,
+            max_pending_handshakes: self.max_pending_handshakes,
+            skip_closed_peers: self.skip_closed_peers,
+            stats: Some(stats),
+        }
+    }
+}
 
 /// TLS termination settings for the proxy's public listener.
 pub struct TlsConfig {
@@ -81,6 +124,7 @@ impl ServerBuilder {
             error_pages: HashMap::new(),
             real_ip: None,
             client_timeouts: ClientTimeouts::default(),
+            listener_limits: ListenerLimits::default(),
             upgrade: false,
             pid_file: None,
             upgrade_sock: None,
@@ -242,6 +286,7 @@ pub struct ServerBuilder {
     error_pages: HashMap<u16, String>,
     real_ip: Option<RealIp>,
     client_timeouts: ClientTimeouts,
+    listener_limits: ListenerLimits,
     upgrade: bool,
     pid_file: Option<String>,
     upgrade_sock: Option<String>,
@@ -349,6 +394,12 @@ impl ServerBuilder {
         self
     }
 
+    /// Limits on the connections the proxy listeners accept. Default: none.
+    pub fn listener_limits(mut self, limits: ListenerLimits) -> Self {
+        self.listener_limits = limits;
+        self
+    }
+
     pub fn build(self) -> Server {
         self.build_with_reload_handle().0
     }
@@ -429,13 +480,20 @@ impl ServerBuilder {
         let mut router_service = http_proxy_service(&server.configuration, router);
         let available_parallelism = thread::available_parallelism().map(Into::into).unwrap_or(1);
         router_service.threads = Some(available_parallelism);
-        router_service.add_tcp(&self.address);
+        router_service.add_listener(
+            ListenerConfig::tcp(self.address.clone())
+                .accept_limits(self.listener_limits.for_listener("http")),
+        );
 
         if let Some((tls, resolver)) = tls {
             let config = tls::server_config(&tls.options, resolver)
                 .expect("Invalid TLS settings, validate the config first");
             let settings = TlsSettings::with_server_config(Arc::new(config));
-            router_service.add_tls_with_settings(&tls.address, None, settings);
+            router_service.add_listener(
+                ListenerConfig::tcp(tls.address.clone())
+                    .tls(settings)
+                    .accept_limits(self.listener_limits.for_listener("https")),
+            );
             tracing::info!("TLS termination enabled on {}", tls.address);
         }
 

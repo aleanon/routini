@@ -252,7 +252,9 @@ LOG_JSON=1 cargo run
 - Prometheus metrics: `localhost:9090` (`server.prometheus_address`): pingora's own plus
   `routini_*` (`src/metrics.rs`): requests/duration per route and status, upstream response
   time and failures per backend, and, read from the live routing table at scrape time,
-  backend health, active connections, latency EWMA and each route's current strategy
+  backend health, active connections, latency EWMA and each route's current strategy;
+  per listener (`http`, `https`) open connections, pending handshakes and connections closed
+  by `server.listener_limits` (`ListenerLimits`, pingora `AcceptLimits`) or failed handshakes
 - Force a strategy at runtime: change the route's `load_balancer.strategy` and send SIGHUP
 
 **Performance Profiling:**

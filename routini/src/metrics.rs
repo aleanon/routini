@@ -12,6 +12,7 @@
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 use arc_swap::ArcSwap;
+use pingora::listeners::AcceptStats;
 use prometheus::{
     HistogramOpts, HistogramVec, IntCounterVec, Opts,
     core::{Collector, Desc},
@@ -94,7 +95,23 @@ pub fn watch(table: &Arc<ArcSwap<RoutingTable>>) {
     tables.push(Arc::downgrade(table));
 }
 
-/// Collects backend and strategy gauges from the live routing tables.
+/// Accept counters of the proxy listeners, by listener name (`http`, `https`).
+type Listeners = Mutex<Vec<(&'static str, Weak<AcceptStats>)>>;
+static LISTENERS: LazyLock<Listeners> = LazyLock::new(|| {
+    // The collector reports listeners too; make sure it is registered
+    LazyLock::force(&TABLES);
+    Mutex::default()
+});
+
+/// Report `stats` as the listener `name` at scrape time. Listeners of the same name (several
+/// servers in one process, as in tests) are summed.
+pub fn watch_listener(name: &'static str, stats: &Arc<AcceptStats>) {
+    let mut listeners = LISTENERS.lock().unwrap_or_else(|p| p.into_inner());
+    listeners.retain(|(_, s)| s.strong_count() > 0);
+    listeners.push((name, Arc::downgrade(stats)));
+}
+
+/// Collects backend and strategy gauges from the live routing tables, and listener counters.
 struct LiveState {
     descs: Vec<Desc>,
 }
@@ -103,28 +120,52 @@ const HEALTHY: &str = "routini_backend_healthy";
 const ACTIVE: &str = "routini_backend_active_connections";
 const LATENCY: &str = "routini_backend_latency_ewma_seconds";
 const STRATEGY: &str = "routini_route_strategy";
+const OPEN: &str = "routini_listener_open_connections";
+const PENDING: &str = "routini_listener_pending_handshakes";
+const CLOSED: &str = "routini_listener_closed_total";
+
+const OPEN_HELP: &str = "Connections accepted and still open";
+const PENDING_HELP: &str = "Connections whose TLS handshake hasn't finished";
+const CLOSED_HELP: &str = "Connections closed by the listener without serving them: at \
+     connection_limit or handshake_limit, peer_gone before its handshake, handshake_timeout or \
+     handshake_error";
 
 fn gauge_family(name: &str, help: &str) -> MetricFamily {
+    family(name, help, prometheus::proto::MetricType::GAUGE)
+}
+
+fn family(name: &str, help: &str, kind: prometheus::proto::MetricType) -> MetricFamily {
     let mut family = MetricFamily::default();
     family.set_name(name.to_string());
     family.set_help(help.to_string());
-    family.set_field_type(prometheus::proto::MetricType::GAUGE);
+    family.set_field_type(kind);
     family
 }
 
-fn sample(labels: &[(&str, &str)], value: f64) -> prometheus::proto::Metric {
+fn labels(labels: &[(&str, &str)]) -> Vec<prometheus::proto::LabelPair> {
+    labels
+        .iter()
+        .map(|(name, value)| {
+            let mut pair = prometheus::proto::LabelPair::default();
+            pair.set_name(name.to_string());
+            pair.set_value(value.to_string());
+            pair
+        })
+        .collect()
+}
+
+fn counter_sample(label_pairs: &[(&str, &str)], value: u64) -> prometheus::proto::Metric {
     let mut metric = prometheus::proto::Metric::default();
-    metric.set_label(
-        labels
-            .iter()
-            .map(|(name, value)| {
-                let mut pair = prometheus::proto::LabelPair::default();
-                pair.set_name(name.to_string());
-                pair.set_value(value.to_string());
-                pair
-            })
-            .collect(),
-    );
+    metric.set_label(labels(label_pairs));
+    let mut counter = prometheus::proto::Counter::default();
+    counter.set_value(value as f64);
+    metric.set_counter(counter);
+    metric
+}
+
+fn sample(label_pairs: &[(&str, &str)], value: f64) -> prometheus::proto::Metric {
+    let mut metric = prometheus::proto::Metric::default();
+    metric.set_label(labels(label_pairs));
     let mut gauge = prometheus::proto::Gauge::default();
     gauge.set_value(value);
     metric.set_gauge(gauge);
@@ -164,6 +205,9 @@ impl LiveState {
                     "The strategy a route currently selects backends with (1)",
                     &["route", "strategy"],
                 ),
+                desc(OPEN, OPEN_HELP, &["listener"]),
+                desc(PENDING, PENDING_HELP, &["listener"]),
+                desc(CLOSED, CLOSED_HELP, &["listener", "reason"]),
             ],
         }
     }
@@ -218,8 +262,77 @@ impl Collector for LiveState {
                 }
             }
         }
-        vec![healthy, active, latency, strategy]
+        let mut families = vec![healthy, active, latency, strategy];
+        families.extend(listener_families());
+        families
     }
+}
+
+/// Totals per listener name, in first-registered order.
+#[derive(Default)]
+struct ListenerTotals {
+    open: usize,
+    pending: usize,
+    closed: [u64; 5],
+}
+
+const CLOSE_REASONS: [&str; 5] = [
+    "connection_limit",
+    "handshake_limit",
+    "peer_gone",
+    "handshake_timeout",
+    "handshake_error",
+];
+
+fn listener_families() -> Vec<MetricFamily> {
+    let mut totals: Vec<(&'static str, ListenerTotals)> = Vec::new();
+    {
+        let listeners = LISTENERS.lock().unwrap_or_else(|p| p.into_inner());
+        for (name, stats) in listeners.iter() {
+            let Some(stats) = stats.upgrade() else {
+                continue;
+            };
+            let index = match totals.iter().position(|(n, _)| n == name) {
+                Some(index) => index,
+                None => {
+                    totals.push((name, ListenerTotals::default()));
+                    totals.len() - 1
+                }
+            };
+            let t = &mut totals[index].1;
+            t.open += stats.open_connections();
+            t.pending += stats.pending_handshakes();
+            for (sum, value) in t.closed.iter_mut().zip([
+                stats.closed_at_connection_limit(),
+                stats.closed_at_handshake_limit(),
+                stats.closed_peer_gone(),
+                stats.handshake_timeouts(),
+                stats.handshake_errors(),
+            ]) {
+                *sum += value;
+            }
+        }
+    }
+    if totals.is_empty() {
+        return Vec::new();
+    }
+    let mut open = gauge_family(OPEN, OPEN_HELP);
+    let mut pending = gauge_family(PENDING, PENDING_HELP);
+    let mut closed = family(CLOSED, CLOSED_HELP, prometheus::proto::MetricType::COUNTER);
+    for (name, t) in &totals {
+        let listener = [("listener", *name)];
+        open.mut_metric().push(sample(&listener, t.open as f64));
+        pending
+            .mut_metric()
+            .push(sample(&listener, t.pending as f64));
+        for (reason, value) in CLOSE_REASONS.iter().zip(t.closed) {
+            closed.mut_metric().push(counter_sample(
+                &[("listener", name), ("reason", reason)],
+                value,
+            ));
+        }
+    }
+    vec![open, pending, closed]
 }
 
 fn strategy_name(strategy: &Adaptive) -> &'static str {
