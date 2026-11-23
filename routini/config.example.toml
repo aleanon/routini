@@ -16,8 +16,8 @@ prometheus_address = "0.0.0.0:9000"
 # client_body_timeout_secs = 60
 # send_timeout_secs = 60
 
-# Debugging: write backend TLS session keys to $SSLKEYLOGFILE for Wireshark. Anyone who can
-# read that file can decrypt the traffic. Restart to change.
+# Debugging: write backend TLS session keys (requests and health checks) to $SSLKEYLOGFILE
+# for Wireshark. Anyone who can read that file can decrypt the traffic. Restart to change.
 # upstream_tls_keylog = false
 
 # Limits on the connections each proxy listener (plain, TLS) accepts. Over a limit a new

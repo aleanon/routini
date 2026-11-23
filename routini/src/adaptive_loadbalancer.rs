@@ -5,6 +5,7 @@ pub mod options;
 use std::{collections::BTreeSet, sync::Arc};
 
 use arc_swap::{ArcSwap, Guard};
+use pingora::connectors::{ConnectorOptions, TransportConnector, http::Connector as HttpConnector};
 use tokio::sync::Notify;
 
 use crate::{
@@ -24,18 +25,27 @@ pub type AdaptiveBackend = Backend<AdaptiveStrategyMetrics>;
 /// A [`Backends`] collection pinned to the adaptive metrics type.
 pub type AdaptiveBackends = Backends<AdaptiveStrategyMetrics>;
 
+/// `connector`: the options probes connect with, see
+/// [AdaptiveLoadBalancer::from_backends_with_connector].
 fn build_health_check(
     opt: &HealthCheckOpt,
+    connector: Option<&ConnectorOptions>,
 ) -> Box<dyn HealthCheck<AdaptiveStrategyMetrics> + Send + Sync + 'static> {
     match &opt.probe {
         HealthProbe::Tcp => {
             let mut check = TcpHealthCheck::new();
             check.consecutive_success = opt.passes;
             check.consecutive_failure = opt.fails;
+            if let Some(options) = connector {
+                check.set_connector(TransportConnector::new(Some(options.clone())));
+            }
             check
         }
         HealthProbe::Http(probe) => {
             let mut check = HttpHealthCheck::new(&probe.host, probe.tls.is_some());
+            if let Some(options) = connector {
+                check.set_connector(HttpConnector::new(Some(options.clone())));
+            }
             check.consecutive_success = opt.passes;
             check.consecutive_failure = opt.fails;
             check.port_override = probe.port;
@@ -114,6 +124,19 @@ impl<D: DecisionEngine> AdaptiveLoadBalancer<D> {
         options: Option<AdaptiveLbOpt>,
         decision_engine: D,
     ) -> Self {
+        Self::from_backends_with_connector(backends, options, decision_engine, None)
+    }
+
+    /// Like [Self::from_backends], with health checks connecting with `connector` (key log,
+    /// CA file, source addresses) instead of pingora's defaults. Routes built by the
+    /// [ServerBuilder](crate::server_builder::ServerBuilder) get the server's, as proxied
+    /// requests do.
+    pub fn from_backends_with_connector(
+        backends: AdaptiveBackends,
+        options: Option<AdaptiveLbOpt>,
+        decision_engine: D,
+        connector: Option<&ConnectorOptions>,
+    ) -> Self {
         let options = options.unwrap_or_default();
         let mut lb =
             LoadBalancer::from_backends_with_strategy(backends, options.starting_strategy.clone());
@@ -123,7 +146,7 @@ impl<D: DecisionEngine> AdaptiveLoadBalancer<D> {
             .is_some()
             .then(|| options.health_check.clone());
         if let Some(health_check) = &health_check {
-            lb.set_health_check(build_health_check(health_check));
+            lb.set_health_check(build_health_check(health_check, connector));
             lb.health_check_frequency = options.health_check_interval;
         }
 

@@ -25,7 +25,9 @@ use std::{collections::HashMap, fmt::Display, path::PathBuf, sync::Arc, time::Du
 use async_trait::async_trait;
 use color_eyre::eyre::{Result, eyre};
 use matchit::Router;
-use pingora::{server::ShutdownWatch, services::background::BackgroundService};
+use pingora::{
+    connectors::ConnectorOptions, server::ShutdownWatch, services::background::BackgroundService,
+};
 use regex::Regex;
 use tokio::{
     signal::unix::{SignalKind, signal},
@@ -87,14 +89,15 @@ struct ManagedRoute {
 }
 
 impl ManagedRoute {
-    fn new(route: Route) -> Self {
+    fn new(route: Route, probe_connector: Option<&ConnectorOptions>) -> Self {
         let key = route_key(&route);
         let decision_engine = AdaptiveDecisionEngine::new(&route.lb_options);
         let configured_strategy = route.lb_options.starting_strategy.clone();
-        let lb: SharedLb = Arc::new(AdaptiveLoadBalancer::from_backends(
+        let lb: SharedLb = Arc::new(AdaptiveLoadBalancer::from_backends_with_connector(
             route.backends,
             Some(route.lb_options),
             decision_engine,
+            probe_connector,
         ));
         let name = display_key(&key);
         Self {
@@ -205,6 +208,9 @@ pub struct RouteManager {
     state: Mutex<State>,
     /// Serves the TLS listener's certificates; a reload swaps in newly loaded ones.
     cert_resolver: Option<Arc<CertResolver>>,
+    /// What health checks connect with, from the server's config (as it was at startup, like
+    /// the proxy's own connector).
+    probe_connector: Option<ConnectorOptions>,
 }
 
 impl RouteManager {
@@ -216,8 +222,12 @@ impl RouteManager {
         config_path: Option<PathBuf>,
         applied: Option<Config>,
         cert_resolver: Option<Arc<CertResolver>>,
+        probe_connector: Option<ConnectorOptions>,
     ) -> Result<(Self, Proxy)> {
-        let routes: Vec<ManagedRoute> = routes.into_iter().map(ManagedRoute::new).collect();
+        let routes: Vec<ManagedRoute> = routes
+            .into_iter()
+            .map(|route| ManagedRoute::new(route, probe_connector.as_ref()))
+            .collect();
         let proxy = Proxy::with_table(build_table(&routes)?);
         let tls = applied
             .as_ref()
@@ -234,6 +244,7 @@ impl RouteManager {
                 started: false,
             }),
             cert_resolver,
+            probe_connector,
         };
         Ok((manager, proxy))
     }
@@ -334,11 +345,11 @@ impl RouteManager {
                 Some(mut existing) => {
                     existing.stop();
                     report.rebuilt.push(name);
-                    new_route(route).await
+                    new_route(route, self.probe_connector.as_ref()).await
                 }
                 None => {
                     report.added.push(name);
-                    new_route(route).await
+                    new_route(route, self.probe_connector.as_ref()).await
                 }
             };
             if started {
@@ -473,8 +484,8 @@ async fn update_in_place(
 }
 
 /// Build a route and populate its backends, so it can serve as soon as it is routable.
-async fn new_route(route: Route) -> ManagedRoute {
-    let managed = ManagedRoute::new(route);
+async fn new_route(route: Route, probe_connector: Option<&ConnectorOptions>) -> ManagedRoute {
+    let managed = ManagedRoute::new(route, probe_connector);
     if let Err(err) = managed.lb().refresh().await {
         tracing::error!(
             route = display_key(&managed.key),

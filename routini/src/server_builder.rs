@@ -9,6 +9,7 @@ use std::{
 
 use color_eyre::eyre::{Result, eyre};
 use pingora::{
+    connectors::ConnectorOptions,
     listeners::{
         AcceptLimits, AcceptStats, DEFAULT_HANDSHAKE_TIMEOUT, ListenerConfig, tls::TlsSettings,
     },
@@ -440,6 +441,15 @@ impl ServerBuilder {
         }
         // Daemonizing is done by the binary before any threads exist, see main.rs
         server_config.daemon = false;
+        // Health checks connect like proxied requests (key log, CA file, source addresses), but
+        // with the pool size pingora gives a connector without options, and no offload threads
+        // of their own.
+        let probe_connector = ConnectorOptions {
+            keepalive_pool_size: 128,
+            offload_threadpool: None,
+            keepalive_pool_callback: None,
+            ..ConnectorOptions::from_server_conf(&server_config)
+        };
         let opt = Opt {
             upgrade: self.upgrade,
             ..Default::default()
@@ -464,6 +474,7 @@ impl ServerBuilder {
             self.reload_config_path.map(PathBuf::from),
             self.applied_config,
             tls.as_ref().map(|(_, resolver)| resolver.clone()),
+            Some(probe_connector),
         )
         .expect("Invalid route");
         router.set_access_log(self.access_log);

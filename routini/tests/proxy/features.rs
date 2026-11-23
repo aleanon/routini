@@ -1043,3 +1043,38 @@ async fn backend_tls_keys_are_logged_only_when_asked_to() {
     assert_eq!(app.get("/a/x").await.0, StatusCode::OK);
     assert!(logged().contains("CLIENT_TRAFFIC_SECRET_0"), "{}", logged());
 }
+
+#[tokio::test]
+async fn health_checks_log_backend_tls_keys_like_requests() {
+    let (backend, _) = tls_backend("backend.internal", None).await;
+    let dir = std::env::temp_dir().join(format!("routini-probe-keylog-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let keylog = dir.join("keys.log");
+    let _ = std::fs::remove_file(&keylog);
+    // SAFETY: set before the server starts; nextest runs each test in its own process
+    unsafe { std::env::set_var("SSLKEYLOGFILE", &keylog) };
+    let routes = route(
+        "/a/*",
+        &[&backend],
+        "[proxy.router.upstream_tls]\nenabled = true\nsni = \"backend.internal\"\nverify = false",
+        "[proxy.router.load_balancer.health_check]\ntype = \"http\"\npath = \"/health\"",
+    )
+    .replace(
+        "health_check_interval_secs = 0",
+        "health_check_interval_secs = 1",
+    );
+
+    let ports = Ports::new();
+    let _app = ReloadApp::start(config(&ports, "upstream_tls_keylog = true", &routes), None).await;
+    // No request is sent, so only a probe can have written keys
+    let logged = || std::fs::read_to_string(&keylog).unwrap_or_default();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !logged().contains("CLIENT_TRAFFIC_SECRET_0") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no probe keys logged: {:?}",
+            logged()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}

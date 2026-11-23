@@ -163,8 +163,9 @@ LOG_JSON=1 cargo run
 - Upstream TLS (`route::UpstreamTls`): `ca_path`, client cert/key loaded into the `HttpPeer`
   (pingora's rustls connector builds a per-peer config for them and for `verify = false`).
   The CA's hash is the peer's `group_key`, as the pool key leaves the CA out. Files are
-  fingerprinted for reload; `server.upstream_tls_keylog` writes the proxy's (not the
-  health checks') backend session keys to `$SSLKEYLOGFILE` for debugging
+  fingerprinted for reload; `server.upstream_tls_keylog` writes backend session keys to
+  `$SSLKEYLOGFILE` for debugging. Health checks connect with the same `ConnectorOptions`
+  (`RouteManager`'s `probe_connector`, from the startup `ServerConf`)
 
 **Process Lifecycle** (`routini/src/shutdown.rs`, `routini/src/main.rs`)
 - SIGTERM / first SIGINT: graceful drain (5s + 5s defaults); second signal forces exit (130)
