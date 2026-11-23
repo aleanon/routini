@@ -65,10 +65,12 @@ impl TlsOptions {
     }
 }
 
+/// The process default if one is installed, else ring (the provider pingora uses). Passed to
+/// every builder, so nothing depends on a default being installed first.
 fn provider() -> Arc<CryptoProvider> {
     CryptoProvider::get_default()
         .cloned()
-        .unwrap_or_else(|| Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
+        .unwrap_or_else(|| Arc::new(rustls::crypto::ring::default_provider()))
 }
 
 /// Load a chain and key and check they belong together.
@@ -239,9 +241,12 @@ pub fn server_config(options: &TlsOptions, resolver: Arc<CertResolver>) -> Resul
         .map_err(|err| eyre!("TLS protocol versions: {err}"))?;
     let builder = match &options.client_ca_path {
         Some(path) => {
-            let verifier = WebPkiClientVerifier::builder(Arc::new(client_roots(path)?))
-                .build()
-                .map_err(|err| eyre!("client CA '{path}': {err}"))?;
+            let verifier = WebPkiClientVerifier::builder_with_provider(
+                Arc::new(client_roots(path)?),
+                provider(),
+            )
+            .build()
+            .map_err(|err| eyre!("client CA '{path}': {err}"))?;
             builder.with_client_cert_verifier(verifier)
         }
         None => builder.with_no_client_auth(),

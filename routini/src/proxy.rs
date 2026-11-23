@@ -902,7 +902,7 @@ impl ProxyHttp for Proxy {
             // Build a fresh HTTPS peer (sni + verification). Per-request cost is acceptable since
             // TLS upstreams are not the throughput-critical path; plain HTTP keeps the cached peer.
             let sni = tls.sni.clone().unwrap_or_default();
-            let mut peer = HttpPeer::new(backend.addr.clone(), true, sni);
+            let mut peer = HttpPeer::new(backend.addr.clone(), true, sni)?;
             peer.options.verify_cert = tls.verify;
             peer.options.verify_hostname = tls.verify;
             peer

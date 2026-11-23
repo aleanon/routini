@@ -16,7 +16,6 @@ use pingora::{
         Server,
         configuration::{Opt, ServerConf},
     },
-    services::listening::Service,
 };
 use regex::Regex;
 
@@ -442,7 +441,7 @@ impl ServerBuilder {
 
         server.add_service(router_service);
 
-        let mut prometheus = Service::prometheus_http_service();
+        let mut prometheus = pingora_prometheus::prometheus_http_service();
         let prometheus_address = self
             .prometheus_address
             .as_deref()

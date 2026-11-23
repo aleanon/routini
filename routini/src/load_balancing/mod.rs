@@ -50,6 +50,11 @@ pub struct NoMetric;
 
 impl Metrics for NoMetric {}
 
+/// A plain-HTTP peer for an IP address. Only Unix socket addresses make [HttpPeer::new] fail.
+pub(crate) fn plain_peer(addr: std::net::SocketAddr) -> HttpPeer {
+    HttpPeer::new(addr, false, String::new()).expect("an IP socket address is a valid peer")
+}
+
 /// [Backend] represents a server to proxy or connect to, generic over its metrics type `M`.
 #[derive(Clone, Debug)]
 pub struct Backend<M: Metrics = NoMetric> {
@@ -115,22 +120,14 @@ impl<M: Metrics> Backend<M> {
         let inet: std::net::SocketAddr = addr
             .parse()
             .or_err(ErrorType::InternalError, "invalid socket addr")?;
-        let addr = SocketAddr::Inet(inet);
-        let peer = HttpPeer::new(addr.clone(), false, String::new());
-        Ok(Backend {
-            addr,
-            weight,
-            ext: Extensions::new(),
-            peer,
-            metrics: M::default(),
-        })
+        Ok(Self::from_socket_addr(inet, weight))
         // TODO: UDS
     }
 
     /// A plain-HTTP backend at `addr`.
     pub fn from_socket_addr(addr: std::net::SocketAddr, weight: usize) -> Self {
+        let peer = plain_peer(addr);
         let addr = SocketAddr::Inet(addr);
-        let peer = HttpPeer::new(addr.clone(), false, String::new());
         Backend {
             addr,
             weight,

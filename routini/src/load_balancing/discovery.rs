@@ -18,7 +18,6 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use pingora::Result;
 use pingora::lb::Extensions;
-use pingora::prelude::HttpPeer;
 use pingora::protocols::l4::socket::SocketAddr;
 use std::io::Result as IoResult;
 use std::net::ToSocketAddrs;
@@ -69,9 +68,10 @@ impl<M: Metrics> Static<M> {
         let mut upstreams = BTreeSet::new();
         for addrs in iter.into_iter() {
             let addrs = addrs.to_socket_addrs()?.map(|addr| {
+                let peer = super::plain_peer(addr);
                 let addr = SocketAddr::Inet(addr);
                 Backend {
-                    peer: HttpPeer::new(addr.clone(), false, String::new()),
+                    peer,
                     addr,
                     weight: 1,
                     ext: Extensions::new(),

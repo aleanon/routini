@@ -646,7 +646,7 @@ mod tests {
             write: None,
             idle: None,
         };
-        let mut peer = HttpPeer::new("127.0.0.1:8080", false, String::new());
+        let mut peer = HttpPeer::new("127.0.0.1:8080", false, String::new()).unwrap();
         let default_write = peer.options.write_timeout;
         cfg.apply(&mut peer);
 
