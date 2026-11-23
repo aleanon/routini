@@ -28,7 +28,9 @@ use crate::{
         AccessControl, CacheConfig, HeaderRules, HostRewrite, PassiveHealthConfig, RetryConfig,
         RouteAction, RouteConfig, TimeoutConfig, UpstreamTls,
     },
-    server_builder::{ListenerLimits, Route, ServerBuilder, TlsConfig as BuilderTlsConfig},
+    server_builder::{
+        HandshakeOffload, ListenerLimits, Route, ServerBuilder, TlsConfig as BuilderTlsConfig,
+    },
     tls::{self, CertPair, TlsOptions, TlsVersion},
     utils::{
         config_loader::ConfigFormat,
@@ -204,6 +206,15 @@ impl Config {
                 errors.push(format!(
                     "server.error_pages: {code} is not an HTTP status code"
                 ));
+            }
+        }
+        if let Some(offload) = self.proxy.tls.as_ref().and_then(|t| t.handshake_offload) {
+            if offload.pools == 0 || offload.threads_per_pool == 0 {
+                errors.push(
+                    "proxy.tls.handshake_offload: pools and threads_per_pool must be greater \
+                     than 0"
+                        .to_string(),
+                );
             }
         }
         if let Some(tls) = &self.proxy.tls {
@@ -595,6 +606,15 @@ pub struct TlsConfig {
     pub min_version: Option<String>,
     /// Require client certificates issued by these CAs (nginx `ssl_verify_client on`).
     pub client_ca_path: Option<String>,
+    /// Run TLS handshakes on dedicated threads, see [HandshakeOffload].
+    pub handshake_offload: Option<HandshakeOffloadInput>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HandshakeOffloadInput {
+    pub pools: usize,
+    pub threads_per_pool: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -638,6 +658,10 @@ impl TlsConfig {
         Ok(BuilderTlsConfig {
             address: self.listener.address(),
             options: self.to_options()?,
+            handshake_offload: self.handshake_offload.map(|o| HandshakeOffload {
+                pools: o.pools,
+                threads_per_pool: o.threads_per_pool,
+            }),
         })
     }
 }
@@ -1726,6 +1750,35 @@ mod tests {
         };
         with("min_version = \"1.3\"").validate().unwrap();
         assert!(errors_of(&with("min_version = \"1.1\"")).contains("min_version must be"));
+    }
+
+    #[test]
+    fn tls_handshake_offload_is_validated() {
+        let dir = crate::tls::test_certs::temp_dir("offload");
+        let (cert, key) = crate::tls::test_certs::write(&dir);
+        let with = |offload: &str| {
+            toml(&MINIMAL_TOML.replace(
+                "listener = 3500",
+                &format!(
+                    "listener = 3500\n[proxy.tls]\nlistener = 3443\ncert_path = \"{cert}\"\n\
+                     key_path = \"{key}\"\nhandshake_offload = {offload}"
+                ),
+            ))
+        };
+        let config = with("{ pools = 2, threads_per_pool = 3 }");
+        config.validate().unwrap();
+        let tls = config.proxy.tls.unwrap().to_builder_tls().unwrap();
+        assert_eq!(
+            tls.handshake_offload,
+            Some(HandshakeOffload {
+                pools: 2,
+                threads_per_pool: 3
+            })
+        );
+        assert!(
+            errors_of(&with("{ pools = 1, threads_per_pool = 0 }"))
+                .contains("threads_per_pool must be greater than 0")
+        );
     }
 
     #[test]

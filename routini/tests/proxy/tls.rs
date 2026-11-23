@@ -409,6 +409,37 @@ async fn min_version_refuses_older_clients() {
     assert_eq!(res.unwrap().status(), StatusCode::OK);
 }
 
+/// Whether this process has a thread whose name starts with `prefix` (Linux truncates names to
+/// 15 bytes).
+fn has_thread(prefix: &str) -> bool {
+    std::fs::read_dir("/proc/self/task").unwrap().any(|task| {
+        std::fs::read_to_string(task.unwrap().path().join("comm"))
+            .is_ok_and(|name| name.starts_with(prefix))
+    })
+}
+
+#[tokio::test]
+async fn handshakes_can_run_on_dedicated_threads() {
+    const OFFLOAD_THREAD: &str = "downstream TLS";
+    let b = TestApp::create_backends(1).await.unwrap();
+    let opts = Options {
+        tls_extra: "handshake_offload = { pools = 1, threads_per_pool = 2 }".into(),
+        ..Default::default()
+    };
+    let app = TlsApp::start("offload", &b[0], opts).await;
+    for _ in 0..3 {
+        // A new client each time, so each request takes a handshake
+        let res = app
+            .client(false)
+            .get(format!("{}/a/health", app.https))
+            .send()
+            .await;
+        assert_eq!(res.unwrap().status(), StatusCode::OK);
+    }
+    // The pool starts with the first offloaded handshake
+    assert!(has_thread(OFFLOAD_THREAD));
+}
+
 #[tokio::test]
 async fn client_certificates_are_required_with_a_client_ca() {
     use rcgen::{BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair};

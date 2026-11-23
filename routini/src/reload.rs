@@ -177,7 +177,15 @@ struct State {
 }
 
 /// The parts of `proxy.tls` that are fixed for the listener's lifetime.
-fn tls_listener_settings(config: &Config) -> Option<(String, bool, TlsVersion, Option<String>)> {
+type TlsListenerSettings = (
+    String,
+    bool,
+    TlsVersion,
+    Option<String>,
+    Option<crate::config::HandshakeOffloadInput>,
+);
+
+fn tls_listener_settings(config: &Config) -> Option<TlsListenerSettings> {
     let tls = config.proxy.tls.as_ref()?;
     let options = tls.to_options().ok()?;
     Some((
@@ -185,6 +193,7 @@ fn tls_listener_settings(config: &Config) -> Option<(String, bool, TlsVersion, O
         options.enable_h2,
         options.min_version,
         options.client_ca_path,
+        tls.handshake_offload,
     ))
 }
 

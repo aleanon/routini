@@ -89,6 +89,17 @@ pub struct TlsConfig {
     pub address: String,
     /// Certificates, protocol versions, client authentication and ALPN, see [crate::tls].
     pub options: TlsOptions,
+    /// Run handshakes on this many pools of this many threads each, instead of on the threads
+    /// serving requests, so a burst of new clients doesn't hold up requests in flight.
+    pub handshake_offload: Option<HandshakeOffload>,
+}
+
+/// Dedicated handshake threads: connections are spread over `pools` by connection id, and over
+/// the `threads_per_pool` single-threaded runtimes of a pool at random.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HandshakeOffload {
+    pub pools: usize,
+    pub threads_per_pool: usize,
 }
 
 const PATH_REGEX_PATTERN: &str = r"^/[^*]*\*?$";
@@ -488,7 +499,10 @@ impl ServerBuilder {
         if let Some((tls, resolver)) = tls {
             let config = tls::server_config(&tls.options, resolver)
                 .expect("Invalid TLS settings, validate the config first");
-            let settings = TlsSettings::with_server_config(Arc::new(config));
+            let mut settings = TlsSettings::with_server_config(Arc::new(config));
+            if let Some(offload) = tls.handshake_offload {
+                settings.set_offload_threadpool(offload.pools, offload.threads_per_pool);
+            }
             router_service.add_listener(
                 ListenerConfig::tcp(tls.address.clone())
                     .tls(settings)

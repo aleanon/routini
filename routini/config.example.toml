@@ -38,6 +38,9 @@ listener = 3500
 # enable_h2 = true
 # min_version = "1.2"               # or "1.3"
 # client_ca_path = "certs/clients.pem"   # require client certificates from this CA (mTLS)
+# Handshakes on dedicated threads (pools x threads_per_pool), so a burst of new clients doesn't
+# hold up requests in flight. Restart to change.
+# handshake_offload = { pools = 1, threads_per_pool = 2 }
 # [[proxy.tls.certificates]]        # more certificates, selected by the DNS names they list
 # cert_path = "certs/api.pem"
 # key_path = "certs/api.key"
