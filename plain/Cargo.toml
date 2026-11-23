@@ -5,5 +5,5 @@ edition = "2024"
 
 [dependencies]
 async-trait = "0.1.89"
-pingora = { version = "0.6.0", features = ["lb","pingora-load-balancing", "pingora-proxy"] }
+pingora = { version = "0.9.1", features = ["lb", "proxy"] }
 jemallocator = "0.5"
