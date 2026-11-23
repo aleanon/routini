@@ -346,6 +346,20 @@ impl Config {
             }
             conf.grace_period_seconds = server.grace_period_seconds;
             conf.graceful_shutdown_timeout_seconds = server.graceful_shutdown_timeout_seconds;
+            if server.upstream_tls_keylog {
+                match std::env::var_os("SSLKEYLOGFILE") {
+                    Some(path) => tracing::warn!(
+                        "server.upstream_tls_keylog: writing backend TLS session keys to {}; \
+                         anyone who can read it can decrypt that traffic",
+                        std::path::Path::new(&path).display()
+                    ),
+                    None => tracing::warn!(
+                        "server.upstream_tls_keylog is on but SSLKEYLOGFILE is not set, so no \
+                         keys are written"
+                    ),
+                }
+                conf.upstream_debug_ssl_keylog = true;
+            }
             builder = builder.server_config(conf);
         }
         for route in self.routes()? {
@@ -476,6 +490,11 @@ pub struct ServerConfig {
     pub send_timeout_secs: Option<u64>,
     /// Limits on the connections each proxy listener accepts.
     pub listener_limits: Option<ListenerLimitsInput>,
+    /// Debugging only: write the session keys of TLS connections to backends to the file named
+    /// by `SSLKEYLOGFILE`, so Wireshark can decrypt them. Anyone who can read that file can read
+    /// the traffic. Default: off.
+    #[serde(default)]
+    pub upstream_tls_keylog: bool,
 }
 
 impl ServerConfig {
@@ -577,6 +596,7 @@ impl ServerConfig {
             || self.upstream_keepalive_pool_size.is_some()
             || self.grace_period_seconds.is_some()
             || self.graceful_shutdown_timeout_seconds.is_some()
+            || self.upstream_tls_keylog
     }
 }
 

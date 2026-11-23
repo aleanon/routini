@@ -1013,3 +1013,33 @@ async fn connections_over_the_listener_limit_are_closed() {
     assert_eq!(served.as_deref(), Some("HTTP/1.1 200 OK"));
     drop(app);
 }
+
+#[tokio::test]
+async fn backend_tls_keys_are_logged_only_when_asked_to() {
+    let (backend, _) = tls_backend("backend.internal", None).await;
+    let dir = std::env::temp_dir().join(format!("routini-keylog-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let keylog = dir.join("keys.log");
+    let _ = std::fs::remove_file(&keylog);
+    // SAFETY: set before any server of this test starts; nextest runs each test in its own
+    // process
+    unsafe { std::env::set_var("SSLKEYLOGFILE", &keylog) };
+    let routes = route(
+        "/a/*",
+        &[&backend],
+        "[proxy.router.upstream_tls]\nenabled = true\nsni = \"backend.internal\"\nverify = false",
+        "",
+    );
+    let logged = || std::fs::read_to_string(&keylog).unwrap_or_default();
+
+    let ports = Ports::new();
+    let app = ReloadApp::start(config(&ports, "", &routes), None).await;
+    assert_eq!(app.get("/a/x").await.0, StatusCode::OK);
+    assert_eq!(logged(), "", "keys logged without upstream_tls_keylog");
+    drop(app);
+
+    let ports = Ports::new();
+    let app = ReloadApp::start(config(&ports, "upstream_tls_keylog = true", &routes), None).await;
+    assert_eq!(app.get("/a/x").await.0, StatusCode::OK);
+    assert!(logged().contains("CLIENT_TRAFFIC_SECRET_0"), "{}", logged());
+}
