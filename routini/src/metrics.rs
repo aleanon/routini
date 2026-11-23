@@ -57,6 +57,28 @@ pub static UPSTREAM_RESPONSE: LazyLock<HistogramVec> = LazyLock::new(|| {
     ))
 });
 
+pub static UPSTREAM_CONNECT: LazyLock<HistogramVec> = LazyLock::new(|| {
+    register(HistogramVec::new(
+        HistogramOpts::new(
+            "routini_upstream_connect_seconds",
+            "Time to open a new connection to a backend: the TCP connect, then the TLS handshake",
+        ),
+        &["route", "backend", "layer"],
+    ))
+});
+
+/// Record how long each layer of a new backend connection took to establish (pingora's
+/// timing digest: TCP first, then TLS).
+pub fn upstream_connected(route: &str, backend: &str, digest: &pingora::protocols::Digest) {
+    for (layer, timing) in ["tcp", "tls"].into_iter().zip(&digest.timing_digest) {
+        if let Some(took) = timing.as_ref().and_then(|t| t.establishment_duration) {
+            UPSTREAM_CONNECT
+                .with_label_values(&[route, backend, layer])
+                .observe(took.as_secs_f64());
+        }
+    }
+}
+
 pub static UPSTREAM_FAILURES: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register(IntCounterVec::new(
         Opts::new(

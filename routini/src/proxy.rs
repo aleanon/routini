@@ -1176,11 +1176,11 @@ impl ProxyHttp for Proxy {
     async fn connected_to_upstream(
         &self,
         _session: &mut Session,
-        _reused: bool,
+        reused: bool,
         _peer: &HttpPeer,
         #[cfg(unix)] _fd: std::os::unix::io::RawFd,
         #[cfg(windows)] _sock: std::os::windows::io::RawSocket,
-        _digest: Option<&Digest>,
+        digest: Option<&Digest>,
         ctx: &mut Self::CTX,
     ) -> Result<()>
     where
@@ -1188,6 +1188,9 @@ impl ProxyHttp for Proxy {
     {
         if let Some(backend) = &ctx.backend {
             backend.metrics.increment_active_connections();
+            if let (false, Some(route), Some(digest)) = (reused, &ctx.route, digest) {
+                metrics::upstream_connected(&route.runtime.name, &backend.addr.to_string(), digest);
+            }
         }
         Ok(())
     }

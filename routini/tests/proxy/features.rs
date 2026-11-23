@@ -707,6 +707,20 @@ async fn route_and_backend_metrics_are_exported() {
         Some(0.0)
     );
     assert!(sample(&text, "routini_backend_latency_ewma_seconds", &backend).is_some());
+    // A plain-HTTP backend: connections took a TCP connect and no TLS handshake
+    let connect = |layer| {
+        sample(
+            &text,
+            "routini_upstream_connect_seconds_count",
+            &[
+                ("route", "/a/*"),
+                ("backend", b[0].as_str()),
+                ("layer", layer),
+            ],
+        )
+    };
+    assert!(connect("tcp").is_some_and(|n| n >= 1.0), "{text}");
+    assert_eq!(connect("tls"), None);
     assert_eq!(
         sample(
             &text,
@@ -814,6 +828,18 @@ async fn upstream_certificate_verification_can_be_turned_off() {
         app.get("/a/x").await,
         (StatusCode::OK, "client=no".to_string())
     );
+    let text = reqwest::get(format!("http://127.0.0.1:{}/", ports.prometheus))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let handshakes = sample(
+        &text,
+        "routini_upstream_connect_seconds_count",
+        &[("route", "/a/*"), ("backend", &backend), ("layer", "tls")],
+    );
+    assert!(handshakes.is_some_and(|n| n >= 1.0), "{text}");
 }
 
 #[tokio::test]
