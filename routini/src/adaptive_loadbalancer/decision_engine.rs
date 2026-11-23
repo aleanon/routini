@@ -181,16 +181,16 @@ impl DecisionEngine for AdaptiveDecisionEngine {
         let exit = t.hysteresis_exit_factor;
 
         // 1. Connection imbalance takes priority as a guard against overloading a single backend.
-        if let Some((ratio, max)) = self.connection_divergence(backends) {
-            if max >= t.min_nr_of_connections {
-                let threshold = if *current_strategy == Adaptive::FewestConnections {
-                    exit_threshold(t.connections_divergence_ratio, exit)
-                } else {
-                    t.connections_divergence_ratio
-                };
-                if ratio > threshold {
-                    return Adaptive::FewestConnections;
-                }
+        if let Some((ratio, max)) = self.connection_divergence(backends)
+            && max >= t.min_nr_of_connections
+        {
+            let threshold = if *current_strategy == Adaptive::FewestConnections {
+                exit_threshold(t.connections_divergence_ratio, exit)
+            } else {
+                t.connections_divergence_ratio
+            };
+            if ratio > threshold {
+                return Adaptive::FewestConnections;
             }
         }
 

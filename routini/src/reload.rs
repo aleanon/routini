@@ -502,7 +502,7 @@ fn build_table(routes: &[ManagedRoute]) -> Result<RoutingTable> {
         let router = if host.is_empty() {
             &mut default_router
         } else {
-            vhosts.entry(host.clone()).or_insert_with(Router::new)
+            vhosts.entry(host.clone()).or_default()
         };
         router
             .insert(path.clone(), value)

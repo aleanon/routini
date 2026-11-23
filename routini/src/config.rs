@@ -196,10 +196,10 @@ impl Config {
             }
         }
 
-        if let Some(level) = self.server.compression_level {
-            if level > 9 {
-                errors.push(format!("server.compression_level must be 0-9, got {level}"));
-            }
+        if let Some(level) = self.server.compression_level
+            && level > 9
+        {
+            errors.push(format!("server.compression_level must be 0-9, got {level}"));
         }
         for code in self.server.error_pages.keys() {
             if !(100..=599).contains(code) {
@@ -208,14 +208,14 @@ impl Config {
                 ));
             }
         }
-        if let Some(offload) = self.proxy.tls.as_ref().and_then(|t| t.handshake_offload) {
-            if offload.pools == 0 || offload.threads_per_pool == 0 {
-                errors.push(
-                    "proxy.tls.handshake_offload: pools and threads_per_pool must be greater \
+        if let Some(offload) = self.proxy.tls.as_ref().and_then(|t| t.handshake_offload)
+            && (offload.pools == 0 || offload.threads_per_pool == 0)
+        {
+            errors.push(
+                "proxy.tls.handshake_offload: pools and threads_per_pool must be greater \
                      than 0"
-                        .to_string(),
-                );
-            }
+                    .to_string(),
+            );
         }
         if let Some(tls) = &self.proxy.tls {
             match tls.to_options() {
@@ -338,9 +338,10 @@ impl Config {
 
         let server = &self.server;
         if server.has_runtime_tuning() {
-            let mut conf = ServerConf::default();
-            conf.upstream_keepalive_pool_size =
-                server.upstream_keepalive_pool_size.unwrap_or(200000);
+            let mut conf = ServerConf {
+                upstream_keepalive_pool_size: server.upstream_keepalive_pool_size.unwrap_or(200000),
+                ..ServerConf::default()
+            };
             if let Some(threads) = server.worker_threads {
                 conf.threads = threads;
             }
@@ -811,7 +812,7 @@ impl RouteEntry {
         }
         if self
             .rate_limit_rps
-            .is_some_and(|rps| !(rps >= 0.001) || rps.is_infinite())
+            .is_some_and(|rps| rps.is_nan() || rps < 0.001 || rps.is_infinite())
         {
             errors.push(format!(
                 "{name}: rate_limit_rps must be at least 0.001 (one request per 1000s)"
@@ -861,7 +862,7 @@ impl RouteEntry {
             ),
             ("latency_divergence_ratio", a.latency_divergence_ratio),
         ] {
-            if value.is_some_and(|v| !(v >= 1.0)) {
+            if value.is_some_and(|v| v.is_nan() || v < 1.0) {
                 errors.push(format!(
                     "{name}: adaptive_lb_opt.{field} must be >= 1.0, got {}",
                     value.unwrap()

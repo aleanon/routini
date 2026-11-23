@@ -19,7 +19,8 @@ fn create_backends(_strategy: &impl Strategy, count: usize) -> BTreeSet<Backend>
             } else {
                 format!("127.0.2.{}:8080", (i - 510) + 1)
             };
-            Backend::new(&addr).expect(&format!("Failed to create backend with addr: {}", addr))
+            Backend::new(&addr)
+                .unwrap_or_else(|_| panic!("Failed to create backend with addr: {}", addr))
         })
         .collect()
 }

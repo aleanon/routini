@@ -41,8 +41,10 @@ impl ProxyHttp for Proxy {
 }
 
 fn main() {
-    let mut server_config = ServerConf::default();
-    server_config.upstream_keepalive_pool_size = 100000;
+    let server_config = ServerConf {
+        upstream_keepalive_pool_size: 100000,
+        ..ServerConf::default()
+    };
     let mut server = Server::new_with_opt_and_conf(None, server_config);
 
     let mut backends = BTreeSet::new();

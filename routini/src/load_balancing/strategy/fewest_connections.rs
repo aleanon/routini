@@ -143,7 +143,7 @@ mod tests {
         backends.insert(backend2.clone());
         backends.insert(backend3.clone());
 
-        let strategy = FewestConnections::default();
+        let strategy = FewestConnections;
         let selector = Arc::new(strategy.build_backend_selector(&backends));
 
         // First backend should be backend1 (0 connections)
@@ -173,7 +173,7 @@ mod tests {
         backends.insert(backend1.clone());
         backends.insert(backend2.clone());
 
-        let strategy = FewestConnections::default();
+        let strategy = FewestConnections;
 
         // Initial selection should pick backend1 (same count, but comes first in BTreeSet)
         let selector = Arc::new(strategy.build_backend_selector(&backends));
@@ -227,7 +227,7 @@ mod tests {
         backends.insert(backend1.clone());
         backends.insert(backend2.clone());
 
-        let strategy = FewestConnections::default();
+        let strategy = FewestConnections;
         let selector = Arc::new(strategy.build_backend_selector(&backends));
 
         let mut iter = selector.iter(&[]);
@@ -244,7 +244,7 @@ mod tests {
     #[test]
     fn test_empty_backends() {
         let backends: BTreeSet<Backend<ActiveConnections>> = BTreeSet::new();
-        let strategy = FewestConnections::default();
+        let strategy = FewestConnections;
         let selector = Arc::new(strategy.build_backend_selector(&backends));
 
         let mut iter = selector.iter(&[]);

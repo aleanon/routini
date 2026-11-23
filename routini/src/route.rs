@@ -155,11 +155,11 @@ impl ConnLimiter {
     }
 
     /// Try to reserve a concurrency slot for `key`. On success returns a [`Guard`] that must be
-    /// held for the request's lifetime (it decrements the count on drop). On `Err` the request is
+    /// held for the request's lifetime (it decrements the count on drop). On `None` the request is
     /// over the limit (the transient increment is already rolled back by dropping the guard).
-    pub fn acquire(&self, key: &IpAddr) -> Result<Guard, ()> {
+    pub fn acquire(&self, key: &IpAddr) -> Option<Guard> {
         let (guard, count) = self.inflight.incr(*key, 1);
-        if count > self.max { Err(()) } else { Ok(guard) }
+        (count <= self.max).then_some(guard)
     }
 }
 
@@ -373,10 +373,10 @@ impl HeaderRules {
         peer_ip: Option<IpAddr>,
         client_tls: bool,
     ) {
-        if let HostRewrite::Set(value) = &self.host {
-            if let Ok(v) = HeaderValue::from_str(value) {
-                let _ = upstream.insert_header(header::HOST, v);
-            }
+        if let HostRewrite::Set(value) = &self.host
+            && let Ok(v) = HeaderValue::from_str(value)
+        {
+            let _ = upstream.insert_header(header::HOST, v);
         }
 
         if self.forwarded {
@@ -742,10 +742,13 @@ mod tests {
 
         let g1 = cl.acquire(&ip).expect("1st under limit");
         let _g2 = cl.acquire(&ip).expect("2nd under limit");
-        assert!(cl.acquire(&ip).is_err(), "3rd is over the limit of 2");
+        assert!(cl.acquire(&ip).is_none(), "3rd is over the limit of 2");
 
         drop(g1); // free a slot
-        assert!(cl.acquire(&ip).is_ok(), "slot reusable after a guard drops");
+        assert!(
+            cl.acquire(&ip).is_some(),
+            "slot reusable after a guard drops"
+        );
     }
 
     #[test]

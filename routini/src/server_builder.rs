@@ -421,12 +421,10 @@ impl ServerBuilder {
         assert!(!self.routes.is_empty(), "requires at least one route");
         // Use a caller-provided ServerConf as-is (it carries the configured tuning); otherwise fall
         // back to defaults with an aggressive upstream keepalive pool.
-        let server_config = self.server_config.unwrap_or_else(|| {
-            let mut config = ServerConf::default();
-            config.upstream_keepalive_pool_size = 200000;
-            config
+        let mut server_config = self.server_config.unwrap_or_else(|| ServerConf {
+            upstream_keepalive_pool_size: 200000,
+            ..ServerConf::default()
         });
-        let mut server_config = server_config;
         // Pingora defaults to a 300s grace period, longer than orchestrators wait before SIGKILL
         server_config
             .grace_period_seconds
@@ -639,7 +637,7 @@ mod tests {
 
         assert_eq!(route.lb_options.max_iterations, 20);
         assert_eq!(route.lb_options.health_check_interval, None);
-        assert_eq!(route.route_config.strip_path_prefix, false);
+        assert!(!route.route_config.strip_path_prefix);
     }
 
     #[test]
@@ -654,13 +652,13 @@ mod tests {
             route.lb_options.health_check_interval,
             Some(Duration::from_secs(1))
         );
-        assert_eq!(route.route_config.strip_path_prefix, true);
+        assert!(route.route_config.strip_path_prefix);
     }
 
     #[test]
     fn test_route_config_default() {
         let config = RouteConfig::default();
-        assert_eq!(config.strip_path_prefix, true);
+        assert!(config.strip_path_prefix);
     }
 
     #[test]

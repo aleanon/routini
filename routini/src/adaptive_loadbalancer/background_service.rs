@@ -76,7 +76,7 @@ impl BackgroundService for AdaptiveLoadBalancer<AdaptiveDecisionEngine> {
 
             // Wake on whichever comes first, so a shutdown is not delayed by a long sleep
             tokio::select! {
-                _ = tokio::time::sleep_until(to_wake.into()) => {}
+                _ = tokio::time::sleep_until(to_wake) => {}
                 // Config reloaded: run discovery, health check and evaluation now, rescheduling
                 // them with the new intervals
                 _ = self.wait_reconfigured() => {

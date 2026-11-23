@@ -67,10 +67,9 @@ impl TestApp {
                 .get(format!("{}/health", app.server_address))
                 .send()
                 .await
+                && response.status().is_success()
             {
-                if response.status().is_success() {
-                    return Ok(app);
-                }
+                return Ok(app);
             }
             if attempt == 49 {
                 return Err(io::Error::new(

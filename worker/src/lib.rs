@@ -32,7 +32,7 @@ async fn test_page(State(address): State<String>) -> Html<&'static str> {
 }
 
 async fn health(State(address): State<String>) -> (StatusCode, String) {
-    println!("Health check sent from {}", &address);
+    println!("Health check sent from {}", address);
     (StatusCode::OK, address)
 }
 

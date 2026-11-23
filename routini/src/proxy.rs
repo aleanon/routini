@@ -767,8 +767,8 @@ impl ProxyHttp for Proxy {
         }
         if let (Some(limiter), Some(ip)) = (&state.conn_limiter, client) {
             match limiter.acquire(&ip) {
-                Ok(guard) => ctx.conn_guard = Some(guard),
-                Err(()) => {
+                Some(guard) => ctx.conn_guard = Some(guard),
+                None => {
                     self.write_status(session, StatusCode::TOO_MANY_REQUESTS.as_u16())
                         .await?;
                     return Ok(true);
@@ -778,12 +778,12 @@ impl ProxyHttp for Proxy {
 
         // Reject oversized bodies early via Content-Length (streaming bodies are guarded in
         // `request_body_filter`).
-        if let Some(max) = state.config.max_body_size {
-            if content_length(session).is_some_and(|len| len > max) {
-                self.write_status(session, StatusCode::PAYLOAD_TOO_LARGE.as_u16())
-                    .await?;
-                return Ok(true);
-            }
+        if let Some(max) = state.config.max_body_size
+            && content_length(session).is_some_and(|len| len > max)
+        {
+            self.write_status(session, StatusCode::PAYLOAD_TOO_LARGE.as_u16())
+                .await?;
+            return Ok(true);
         }
 
         ctx.state = Some(state);
@@ -799,15 +799,15 @@ impl ProxyHttp for Proxy {
         ctx: &mut Self::CTX,
     ) -> Result<()> {
         let max = ctx.state.as_ref().and_then(|s| s.config.max_body_size);
-        if let Some(max) = max {
-            if let Some(chunk) = body.as_ref() {
-                ctx.body_seen = ctx.body_seen.saturating_add(chunk.len());
-                if ctx.body_seen > max {
-                    return Err(Error::explain(
-                        ErrorType::HTTPStatus(StatusCode::PAYLOAD_TOO_LARGE.as_u16()),
-                        "request body exceeds max_body_size",
-                    ));
-                }
+        if let Some(max) = max
+            && let Some(chunk) = body.as_ref()
+        {
+            ctx.body_seen = ctx.body_seen.saturating_add(chunk.len());
+            if ctx.body_seen > max {
+                return Err(Error::explain(
+                    ErrorType::HTTPStatus(StatusCode::PAYLOAD_TOO_LARGE.as_u16()),
+                    "request body exceeds max_body_size",
+                ));
             }
         }
         Ok(())
@@ -855,22 +855,21 @@ impl ProxyHttp for Proxy {
             return Ok(cacheable);
         }
 
-        if resp.status == StatusCode::OK {
-            if let Some(ttl) = ctx
+        if resp.status == StatusCode::OK
+            && let Some(ttl) = ctx
                 .state
                 .as_ref()
                 .and_then(|s| s.config.cache.as_ref())
                 .map(|c| c.ttl)
-            {
-                let now = SystemTime::now();
-                return Ok(RespCacheable::Cacheable(CacheMeta::new(
-                    now + ttl,
-                    now,
-                    0,
-                    0,
-                    resp.clone(),
-                )));
-            }
+        {
+            let now = SystemTime::now();
+            return Ok(RespCacheable::Cacheable(CacheMeta::new(
+                now + ttl,
+                now,
+                0,
+                0,
+                resp.clone(),
+            )));
         }
         Ok(cacheable)
     }
@@ -1001,11 +1000,11 @@ impl ProxyHttp for Proxy {
             state.config.headers.apply_response(upstream_response);
 
             // HSTS is only meaningful over HTTPS, so add it only for TLS-terminated requests.
-            if let Some(hsts) = &state.config.hsts {
-                if client_is_tls(session) {
-                    let _ = upstream_response
-                        .insert_header(http::header::STRICT_TRANSPORT_SECURITY, hsts);
-                }
+            if let Some(hsts) = &state.config.hsts
+                && client_is_tls(session)
+            {
+                let _ =
+                    upstream_response.insert_header(http::header::STRICT_TRANSPORT_SECURITY, hsts);
             }
         }
         if let Some(id) = &ctx.request_id {
@@ -1132,11 +1131,11 @@ impl ProxyHttp for Proxy {
                 ErrorType::ReadTimedout | ErrorType::WriteTimedout
             );
         if let (true, Some(route), Some(state)) = (timed_out, &ctx.route, &ctx.state) {
-            if let Some(backend) = &ctx.backend {
-                if state.health.record_failure(backend) {
-                    route.runtime.lb.set_backend_enabled(backend, false);
-                    log::warn!("Passively ejected backend {}", backend.addr);
-                }
+            if let Some(backend) = &ctx.backend
+                && state.health.record_failure(backend)
+            {
+                route.runtime.lb.set_backend_enabled(backend, false);
+                log::warn!("Passively ejected backend {}", backend.addr);
             }
             let retry = &state.config.retry;
             if retry.retry_on_timeout
@@ -1160,10 +1159,10 @@ impl ProxyHttp for Proxy {
         Self::CTX: Send + Sync,
     {
         let code = error_to_status(e);
-        if code > 0 {
-            if let Err(err) = self.write_status(session, code).await {
-                log::error!("failed to send error response to downstream: {err}");
-            }
+        if code > 0
+            && let Err(err) = self.write_status(session, code).await
+        {
+            log::error!("failed to send error response to downstream: {err}");
         }
         FailToProxy {
             error_code: code,

@@ -1,0 +1,4 @@
+# Backend orders and hashes by address and weight only; its metrics are atomics the set never
+# looks at, so keeping backends in a BTreeSet or HashMap is sound. Setting this replaces
+# clippy's default list, hence bytes::Bytes (HeaderName constants) again.
+ignore-interior-mutability = ["bytes::Bytes", "routini::load_balancing::Backend"]

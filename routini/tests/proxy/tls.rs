@@ -1,5 +1,9 @@
 //! TLS termination end to end: a real server with a self-signed certificate, real backends.
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use reqwest::{Certificate, StatusCode, Version, redirect::Policy};
 use routini::{reload::RouteManager, utils::config_loader::load_config_from};
@@ -15,7 +19,7 @@ fn free_port() -> u16 {
 }
 
 /// Write a self-signed certificate for 127.0.0.1 into `dir`, returning its PEM.
-fn write_cert(dir: &PathBuf) -> String {
+fn write_cert(dir: &Path) -> String {
     let cert = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
     std::fs::write(dir.join("cert.pem"), cert.cert.pem()).unwrap();
     std::fs::write(dir.join("key.pem"), cert.key_pair.serialize_pem()).unwrap();
