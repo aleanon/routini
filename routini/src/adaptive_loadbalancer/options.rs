@@ -42,6 +42,9 @@ pub struct HealthCheckOpt {
     pub passes: usize,
     /// Failed probes in a row that take a healthy backend out (nginx `fails`).
     pub fails: usize,
+    /// A backend added later starts unhealthy and gets traffic only once probes pass it (nginx
+    /// Plus `health_check mandatory`). Otherwise it is healthy until a probe fails.
+    pub mandatory: bool,
 }
 
 impl Default for HealthCheckOpt {
@@ -50,6 +53,7 @@ impl Default for HealthCheckOpt {
             probe: HealthProbe::Tcp,
             passes: 1,
             fails: 1,
+            mandatory: false,
         }
     }
 }

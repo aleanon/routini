@@ -147,6 +147,7 @@ impl<D: DecisionEngine> AdaptiveLoadBalancer<D> {
             .then(|| options.health_check.clone());
         if let Some(health_check) = &health_check {
             lb.set_health_check(build_health_check(health_check, connector));
+            lb.set_health_check_mandatory(health_check.mandatory);
             lb.health_check_frequency = options.health_check_interval;
         }
 
@@ -186,6 +187,14 @@ impl<D: DecisionEngine> AdaptiveLoadBalancer<D> {
     /// Backends that are kept retain their metrics and health.
     pub async fn refresh(&self) -> pingora::Result<()> {
         self.lb.update().await
+    }
+
+    /// Probe every backend once now, outside the background task's schedule.
+    pub async fn run_health_check(&self) {
+        self.lb
+            .backends()
+            .run_health_check(self.lb.parallel_health_check)
+            .await
     }
 
     pub(crate) async fn wait_reconfigured(&self) {

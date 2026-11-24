@@ -492,6 +492,14 @@ async fn new_route(route: Route, probe_connector: Option<&ConnectorOptions>) -> 
             "Failed to load backends: {err}"
         );
     }
+    // Its backends start out unhealthy, so probe them before the route takes over traffic
+    if managed
+        .lb()
+        .health_check()
+        .is_some_and(|check| check.mandatory)
+    {
+        managed.lb().run_health_check().await;
+    }
     managed
 }
 

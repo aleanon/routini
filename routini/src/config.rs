@@ -1317,6 +1317,9 @@ pub struct HealthCheckInput {
     pub passes: Option<usize>,
     /// Failed probes in a row that take a backend out. Default 1.
     pub fails: Option<usize>,
+    /// Backends added later (reload, DNS) get no traffic until `passes` probes pass them.
+    #[serde(default)]
+    pub mandatory: bool,
 }
 
 impl HealthCheckInput {
@@ -1385,6 +1388,7 @@ impl HealthCheckInput {
             probe,
             passes,
             fails,
+            mandatory: self.mandatory,
         })
     }
 }
@@ -1837,7 +1841,7 @@ mod tests {
     fn health_checks_are_parsed_with_upstream_tls() {
         let config = with_lb(
             "[proxy.router.load_balancer.health_check]\ntype = \"http\"\npath = \"/healthz?deep=1\"\n\
-             expected_status = [200, 204]\nfails = 3\n\
+             expected_status = [200, 204]\nfails = 3\nmandatory = true\n\
              [proxy.router.upstream_tls]\nenabled = true\nsni = \"api.internal\"",
         );
         config.validate().unwrap();
@@ -1861,6 +1865,7 @@ mod tests {
                 }),
                 passes: 1,
                 fails: 3,
+                mandatory: true,
             }
         );
     }

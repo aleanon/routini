@@ -174,6 +174,8 @@ impl<M: Metrics> std::net::ToSocketAddrs for Backend<M> {
 pub struct Backends<M: Metrics = NoMetric> {
     discovery: Box<dyn ServiceDiscovery<M> + Send + Sync + 'static>,
     health_check: Option<Arc<dyn health_check::HealthCheck<M> + Send + Sync + 'static>>,
+    /// See [Self::set_health_check_mandatory].
+    health_check_mandatory: bool,
     backends: ArcSwap<BTreeSet<Backend<M>>>,
     health: ArcSwap<HashMap<u64, Health>>,
 }
@@ -186,6 +188,7 @@ impl<M: Metrics> Backends<M> {
         Self {
             discovery,
             health_check: None,
+            health_check_mandatory: false,
             backends: Default::default(),
             health: Default::default(),
         }
@@ -197,6 +200,14 @@ impl<M: Metrics> Backends<M> {
         hc: Box<dyn health_check::HealthCheck<M> + Send + Sync + 'static>,
     ) {
         self.health_check = Some(hc.into())
+    }
+
+    /// With `mandatory`, a backend that discovery adds starts out unhealthy and gets no traffic
+    /// until the health check has passed it (its `consecutive_success` probes in a row). Without
+    /// it (the default) a new backend is healthy until a check fails. Has no effect without a
+    /// health check.
+    pub fn set_health_check_mandatory(&mut self, mandatory: bool) {
+        self.health_check_mandatory = mandatory;
     }
 
     /// Updates backends when the new is different from the current set,
@@ -230,8 +241,10 @@ impl<M: Metrics> Backends<M> {
 
                 let hash_key = backend.hash_key();
 
-                // use the default health if the backend is new
-                let backend_health = old_health.get(&hash_key).cloned().unwrap_or_default();
+                // A new backend is healthy unless a mandatory health check has to pass it first
+                let backend_health = old_health.get(&hash_key).cloned().unwrap_or_else(|| {
+                    Health::new(!(self.health_check_mandatory && self.health_check.is_some()))
+                });
 
                 // override enablement
                 if let Some(backend_enabled) = enablement.get(&hash_key) {
@@ -553,6 +566,11 @@ where
         self.backends.set_health_check(hc);
     }
 
+    /// See [Backends::set_health_check_mandatory].
+    pub fn set_health_check_mandatory(&mut self, mandatory: bool) {
+        self.backends.set_health_check_mandatory(mandatory);
+    }
+
     /// Access the [Backends] of this [LoadBalancer]
     pub fn backends(&self) -> &Backends<M> {
         &self.backends
@@ -579,6 +597,41 @@ mod test {
         let backend = backends.backends().get_backend();
         assert!(backend.contains(&backend1));
         assert!(backend.contains(&backend2));
+    }
+
+    #[tokio::test]
+    async fn a_mandatory_health_check_keeps_new_backends_out_until_they_pass() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let up = Backend::new(&listener.local_addr().unwrap().to_string()).unwrap();
+        let down = Backend::new("127.0.0.1:1").unwrap();
+        for mandatory in [false, true] {
+            let discovery = discovery::Static::default();
+            discovery.add(up.clone());
+            discovery.add(down.clone());
+            let mut backends = Backends::new(Box::new(discovery));
+            backends.set_health_check(health_check::TcpHealthCheck::new());
+            backends.set_health_check_mandatory(mandatory);
+            backends.update(&RoundRobin, |_| {}).await.unwrap();
+
+            // Not probed yet: trusted without a mandatory check, not with one
+            assert_eq!(backends.ready(&up), !mandatory, "mandatory = {mandatory}");
+            assert_eq!(backends.ready(&down), !mandatory, "mandatory = {mandatory}");
+
+            backends.run_health_check(false).await;
+            assert!(backends.ready(&up), "mandatory = {mandatory}");
+            assert!(!backends.ready(&down), "mandatory = {mandatory}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_mandatory_flag_without_a_health_check_changes_nothing() {
+        let discovery = discovery::Static::default();
+        let backend = Backend::new("127.0.0.1:1").unwrap();
+        discovery.add(backend.clone());
+        let mut backends: Backends = Backends::new(Box::new(discovery));
+        backends.set_health_check_mandatory(true);
+        backends.update(&RoundRobin, |_| {}).await.unwrap();
+        assert!(backends.ready(&backend));
     }
 
     #[tokio::test]

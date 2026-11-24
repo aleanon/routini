@@ -319,11 +319,7 @@ pub(crate) struct Health(ArcSwap<HealthInner>);
 
 impl Default for Health {
     fn default() -> Self {
-        Health(ArcSwap::new(Arc::new(HealthInner {
-            healthy: true, // TODO: allow to start with unhealthy
-            enabled: true,
-            consecutive_counter: 0,
-        })))
+        Self::new(true)
     }
 }
 
@@ -335,6 +331,15 @@ impl Clone for Health {
 }
 
 impl Health {
+    /// A backend that is `healthy` (or not) until health checks flip it.
+    pub(crate) fn new(healthy: bool) -> Self {
+        Health(ArcSwap::new(Arc::new(HealthInner {
+            healthy,
+            enabled: true,
+            consecutive_counter: 0,
+        })))
+    }
+
     pub fn ready(&self) -> bool {
         let h = self.0.load();
         h.healthy && h.enabled

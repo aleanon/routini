@@ -263,6 +263,81 @@ async fn http_health_check_takes_out_backends_tcp_would_keep() {
 }
 
 #[tokio::test]
+async fn a_mandatory_health_check_keeps_added_backends_out_until_probed() {
+    let good = TestApp::create_backends(1).await.unwrap();
+    let broken = tcp_only_backend().await;
+    let ok_count = |app: &ReloadApp| {
+        let (client, url) = (app.client.clone(), format!("{}/a/health", app.base));
+        async move {
+            let mut ok = 0;
+            for _ in 0..20 {
+                if client.get(&url).send().await.unwrap().status() == StatusCode::OK {
+                    ok += 1;
+                }
+            }
+            ok
+        }
+    };
+    for mandatory in [true, false] {
+        let ports = Ports::new();
+        // Probed when the route starts, then not again during the test
+        let config_with = |backends: &[&String], path: &str| {
+            let check = format!(
+                "[proxy.router.load_balancer.health_check]\ntype = \"http\"\npath = \"{path}\"\n\
+                 mandatory = {mandatory}"
+            );
+            let routes = route("/a/*", backends, "", &check).replace(
+                "health_check_interval_secs = 0",
+                "health_check_interval_secs = 60",
+            );
+            ports_config(&ports, &routes)
+        };
+        let app = ReloadApp::start(config_with(&[&good[0]], "/health"), None).await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while ok_count(&app).await < 20 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the good backend never came up"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        // An added backend that accepts connections but never answers
+        let report = app
+            .manager
+            .reload(config_with(&[&good[0], &broken], "/health"))
+            .await
+            .unwrap();
+        assert_eq!(report.updated, vec!["/a/*"]);
+        let ok = ok_count(&app).await;
+        if mandatory {
+            assert_eq!(ok, 20, "the unprobed backend got traffic");
+        } else {
+            assert!(
+                ok < 20,
+                "without mandatory the new backend is trusted at once"
+            );
+        }
+
+        if mandatory {
+            // A changed check rebuilds the route, whose backends all start unprobed: it is
+            // probed before it replaces the old one
+            let report = app
+                .manager
+                .reload(config_with(&[&good[0], &broken], "/health?rebuilt"))
+                .await
+                .unwrap();
+            assert_eq!(report.rebuilt, vec!["/a/*"]);
+            assert_eq!(
+                ok_count(&app).await,
+                20,
+                "the rebuilt route was not probed first"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn rate_limit_allows_a_burst_per_client_then_rejects_or_delays() {
     let b = TestApp::create_backends(1).await.unwrap();
     let ports = Ports::new();

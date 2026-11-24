@@ -16,7 +16,8 @@ JSON and reloadable without a restart.
   connections and fastest server (latency EWMA), weighted backends, hash keys from the client
   address, URI, path, a header or a cookie. Upstreams may be hostnames, re-resolved on an interval
 - **Adaptive strategy switching** per route, with hysteresis so it doesn't flap (see below)
-- **Health**: active TCP or HTTP health checks, passive health (failures take a backend out),
+- **Health**: active TCP or HTTP health checks (optionally mandatory: new backends wait for
+  their first passing probe), passive health (failures take a backend out),
   retries on another backend for connect errors, timeouts and chosen statuses
 - **Traffic control**: per-client rate limits (with or without delaying the burst), per-client
   connection limits, per-listener connection and TLS handshake limits, maximum body size,

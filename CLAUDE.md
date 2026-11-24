@@ -134,7 +134,9 @@ LOG_JSON=1 cargo run
   FastestServer (EWMA). `BackendSelection::iter(&'a self)` returns a borrowing GAT iterator
 - `UpstreamDiscovery` (shared via `Arc` so reload can change upstreams): IP or `hostname:port`
   upstreams, names re-resolved every `dns_refresh_secs` keeping the last good result; TCP or
-  HTTP health checks (`HealthCheckOpt`; HTTP probes follow the route's `upstream_tls`)
+  HTTP health checks (`HealthCheckOpt`; HTTP probes follow the route's `upstream_tls`). With
+  `mandatory` a new backend starts unhealthy (`Backends::set_health_check_mandatory`) and
+  reload probes a new or rebuilt route before it goes live
 
 **Adaptive Load Balancer** (`routini/src/adaptive_loadbalancer/`)
 - `AdaptiveLoadBalancer<D: DecisionEngine>`; config and engine thresholds behind `ArcSwap`,
