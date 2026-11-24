@@ -61,3 +61,14 @@ jobs:
       - name: Benchmarks build
         if: matrix.crate == 'routini'
         run: cargo bench --locked --no-run
+
+  # The images compose.yml builds; their toolchains are pinned separately from the one above
+  docker:
+    name: docker images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: routini
+        run: docker build -f routini/Dockerfile -t routini .
+      - name: worker
+        run: docker build -t worker worker

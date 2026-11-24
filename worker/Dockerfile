@@ -1,8 +1,8 @@
 # Start with image that has the Rust toolchain installed
-FROM rust:1.85-alpine AS chef
+FROM rust:1-alpine AS chef
 USER root
 # Add cargo-chef to cache dependencies
-RUN apk add --no-cache musl-dev & cargo install cargo-chef
+RUN apk add --no-cache musl-dev && cargo install cargo-chef
 WORKDIR /app
 
 FROM chef AS planner
@@ -21,7 +21,7 @@ RUN cargo build --release
 
 # We do not need the Rust toolchain to run the binary!
 # Start with a minimal image and copy over the binary and assets folder.
-FROM debian:buster-slim AS runtime
+FROM debian:bookworm-slim AS runtime
 WORKDIR /app
 COPY --from=builder /app/target/release/worker-bin /usr/local/bin
 ENTRYPOINT ["/usr/local/bin/worker-bin"]
