@@ -888,6 +888,11 @@ impl RouteEntry {
                 "{name}: adaptive_lb_opt.evaluate_strategy_frequency_secs must be greater than 0"
             ));
         }
+        if a.selector_rebuild_interval_ms == Some(0) {
+            errors.push(format!(
+                "{name}: adaptive_lb_opt.selector_rebuild_interval_ms must be greater than 0"
+            ));
+        }
     }
 
     /// Build just the per-route runtime config (no backends/LB). Used for hot reload.
@@ -1264,6 +1269,9 @@ impl LoadBalancerConfig {
         if let Some(v) = a.hysteresis_exit_factor {
             opt.hysteresis_exit_factor = v;
         }
+        if let Some(ms) = a.selector_rebuild_interval_ms {
+            opt.selector_rebuild_interval = Duration::from_millis(ms);
+        }
         if let Some(key) = &self.hash_key {
             opt.hash_key = key
                 .parse()
@@ -1402,6 +1410,7 @@ pub struct AdaptiveLbOptConfig {
     pub evaluate_strategy_frequency_secs: Option<u64>,
     pub min_nr_of_connections: Option<usize>,
     pub hysteresis_exit_factor: Option<f32>,
+    pub selector_rebuild_interval_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -1934,6 +1943,30 @@ mod tests {
         assert!(
             errors_of(&config)
                 .contains("server.listener_limits.max_pending_handshakes must be greater than 0")
+        );
+    }
+
+    #[test]
+    fn selector_rebuild_interval_is_parsed_and_validated() {
+        let config = with_lb(
+            "[proxy.router.load_balancer.adaptive_lb_opt]\nselector_rebuild_interval_ms = 50",
+        );
+        config.validate().unwrap();
+        let route = &config.proxy.router[0];
+        let opt = route.load_balancer.to_lb_opt(&route.upstream_tls).unwrap();
+        assert_eq!(opt.selector_rebuild_interval, Duration::from_millis(50));
+
+        let default = toml(MINIMAL_TOML);
+        let route = &default.proxy.router[0];
+        let opt = route.load_balancer.to_lb_opt(&route.upstream_tls).unwrap();
+        assert_eq!(opt.selector_rebuild_interval, Duration::from_millis(200));
+
+        let config = with_lb(
+            "[proxy.router.load_balancer.adaptive_lb_opt]\nselector_rebuild_interval_ms = 0",
+        );
+        assert!(
+            errors_of(&config)
+                .contains("adaptive_lb_opt.selector_rebuild_interval_ms must be greater than 0")
         );
     }
 

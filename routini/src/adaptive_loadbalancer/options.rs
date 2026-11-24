@@ -8,7 +8,8 @@ use crate::{
         DEFAULT_CONNECTIONS_DIV_RATIO, DEFAULT_DISCOVERY_INTERVAL,
         DEFAULT_EVALUATE_STRATEGY_FREQUENCY, DEFAULT_HEALTH_CHECK_FREQUENCY,
         DEFAULT_HYSTERESIS_EXIT_FACTOR, DEFAULT_LATENCY_DIV_RATIO,
-        DEFAULT_MAX_ALGORITHM_ITERATIONS, DEFAULT_MIN_NR_OF_CONNECTIONS, DEFAULT_SMOOTHING_FACTOR,
+        DEFAULT_MAX_ALGORITHM_ITERATIONS, DEFAULT_MIN_NR_OF_CONNECTIONS,
+        DEFAULT_SELECTOR_REBUILD_INTERVAL, DEFAULT_SMOOTHING_FACTOR,
     },
 };
 
@@ -31,6 +32,9 @@ pub struct AdaptiveLbOpt {
     pub health_check: HealthCheckOpt,
     /// How often service discovery runs again, resolving upstream DNS names. `None`: once.
     pub discovery_interval: Option<Duration>,
+    /// How often the metric-driven strategies (FewestConnections, FastestServer) re-sort the
+    /// backends by their live connection counts or latencies.
+    pub selector_rebuild_interval: Duration,
 }
 
 /// An active health check (nginx Plus `health_check`): how a backend is probed and how many
@@ -162,6 +166,7 @@ impl Default for AdaptiveLbOpt {
             hash_key: HashKey::default(),
             health_check: HealthCheckOpt::default(),
             discovery_interval: Some(DEFAULT_DISCOVERY_INTERVAL),
+            selector_rebuild_interval: DEFAULT_SELECTOR_REBUILD_INTERVAL,
         }
     }
 }
@@ -179,6 +184,7 @@ pub struct AdaptiveLbConfig {
     pub hysteresis_exit_factor: f32,
     pub hash_key: HashKey,
     pub discovery_interval: Option<Duration>,
+    pub selector_rebuild_interval: Duration,
 }
 
 impl From<AdaptiveLbOpt> for AdaptiveLbConfig {
@@ -200,6 +206,7 @@ impl From<&AdaptiveLbOpt> for AdaptiveLbConfig {
             hysteresis_exit_factor: value.hysteresis_exit_factor,
             hash_key: value.hash_key.clone(),
             discovery_interval: value.discovery_interval,
+            selector_rebuild_interval: value.selector_rebuild_interval,
         }
     }
 }

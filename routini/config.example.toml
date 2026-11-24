@@ -127,6 +127,7 @@ health_check_interval_secs = 1
 # evaluate_strategy_frequency_secs = 5
 # min_nr_of_connections = 1000
 # hysteresis_exit_factor = 0.75
+# selector_rebuild_interval_ms = 200   # FewestConnections/FastestServer re-sort backends this often
 
 [[proxy.router.load_balancer.upstreams]]
 address = "127.0.0.1:4001"

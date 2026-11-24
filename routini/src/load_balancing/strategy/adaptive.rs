@@ -54,7 +54,7 @@ impl<M: Metrics> Strategy<M> for Adaptive {
     fn rebuild_frequency(&self) -> Option<Duration> {
         match self {
             Adaptive::FewestConnections | Adaptive::FastestServer => {
-                Some(Duration::from_millis(200))
+                Some(crate::utils::constants::DEFAULT_SELECTOR_REBUILD_INTERVAL)
             }
             _ => None,
         }

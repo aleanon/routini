@@ -20,7 +20,7 @@ impl BackgroundService for AdaptiveLoadBalancer<AdaptiveDecisionEngine> {
         let mut next_update = now;
         let mut next_health_check = now;
         let mut next_strategy_eval = now;
-        let mut selector_rebuild = now + self.lb.rebuild_frequency().await.unwrap_or(NEVER);
+        let mut selector_rebuild = now + self.rebuild_interval().await.unwrap_or(NEVER);
 
         loop {
             if *shutdown.borrow() {
@@ -53,13 +53,13 @@ impl BackgroundService for AdaptiveLoadBalancer<AdaptiveDecisionEngine> {
                 let was_updated = self.lb.update_strategy(strategy).await;
                 next_strategy_eval = now + self.config().evaluate_strategy_frequency;
                 if was_updated {
-                    selector_rebuild = now + self.lb.rebuild_frequency().await.unwrap_or(NEVER);
+                    selector_rebuild = now + self.rebuild_interval().await.unwrap_or(NEVER);
                 }
             }
 
             if selector_rebuild <= now {
                 self.lb.rebuild_selector().await;
-                selector_rebuild = now + self.lb.rebuild_frequency().await.unwrap_or(NEVER);
+                selector_rebuild = now + self.rebuild_interval().await.unwrap_or(NEVER);
             }
 
             let Some(to_wake) = [
@@ -83,6 +83,7 @@ impl BackgroundService for AdaptiveLoadBalancer<AdaptiveDecisionEngine> {
                     next_update = Instant::now();
                     next_health_check = Instant::now();
                     next_strategy_eval = Instant::now();
+                    selector_rebuild = Instant::now();
                 }
                 changed = shutdown.changed() => {
                     // Err means the sender is gone, which only happens when the server is
@@ -94,5 +95,48 @@ impl BackgroundService for AdaptiveLoadBalancer<AdaptiveDecisionEngine> {
             }
             now = Instant::now();
         }
+    }
+}
+
+impl AdaptiveLoadBalancer<AdaptiveDecisionEngine> {
+    /// How long until the selector is rebuilt again: the route's interval for a strategy that
+    /// re-sorts by live metrics, `None` for one that doesn't.
+    async fn rebuild_interval(&self) -> Option<Duration> {
+        self.lb
+            .rebuild_frequency()
+            .await
+            .map(|_| self.config().selector_rebuild_interval)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        adaptive_loadbalancer::options::AdaptiveLbOpt,
+        load_balancing::{Backends, discovery::Static, strategy::Adaptive},
+    };
+
+    fn lb(strategy: Adaptive) -> AdaptiveLoadBalancer<AdaptiveDecisionEngine> {
+        let opt = AdaptiveLbOpt {
+            starting_strategy: strategy,
+            selector_rebuild_interval: Duration::from_millis(50),
+            health_check_interval: None,
+            ..Default::default()
+        };
+        let engine = AdaptiveDecisionEngine::new(&opt);
+        let discovery = Static::try_from_iter(["127.0.0.1:7001"]).unwrap();
+        AdaptiveLoadBalancer::from_backends(Backends::new(discovery), Some(opt), engine)
+    }
+
+    #[tokio::test]
+    async fn selectors_are_rebuilt_at_the_routes_interval_when_metrics_drive_them() {
+        for strategy in [Adaptive::FewestConnections, Adaptive::FastestServer] {
+            assert_eq!(
+                lb(strategy).rebuild_interval().await,
+                Some(Duration::from_millis(50))
+            );
+        }
+        assert_eq!(lb(Adaptive::RoundRobin).rebuild_interval().await, None);
     }
 }

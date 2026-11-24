@@ -66,9 +66,9 @@ impl<M: Metrics> Strategy<M> for FastestServer {
         FastestServerSelector { backends }
     }
 
+    /// The adaptive load balancer uses its route's `selector_rebuild_interval` instead.
     fn rebuild_frequency(&self) -> Option<Duration> {
-        // TODO: Implement configurable value held in self
-        Some(Duration::from_millis(200))
+        Some(crate::utils::constants::DEFAULT_SELECTOR_REBUILD_INTERVAL)
     }
 }
 

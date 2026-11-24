@@ -62,9 +62,9 @@ impl<M: Metrics> Strategy<M> for FewestConnections {
         FewestConnectionsSelector { backends }
     }
 
+    /// The adaptive load balancer uses its route's `selector_rebuild_interval` instead.
     fn rebuild_frequency(&self) -> Option<Duration> {
-        // TODO: Change this to a configurable value held in self
-        Some(Duration::from_millis(200))
+        Some(crate::utils::constants::DEFAULT_SELECTOR_REBUILD_INTERVAL)
     }
 }
 

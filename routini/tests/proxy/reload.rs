@@ -107,7 +107,8 @@ async fn reload_applies_tuning_strategy_and_route_settings_live() {
         "strip_prefix = false",
         "strategy = \"Consistent\"\nmax_iterations = 7\n\
          [proxy.router.load_balancer.adaptive_lb_opt]\nmin_nr_of_connections = 3\n\
-         evaluate_strategy_frequency_secs = 1\nhysteresis_exit_factor = 0.5",
+         evaluate_strategy_frequency_secs = 1\nhysteresis_exit_factor = 0.5\n\
+         selector_rebuild_interval_ms = 50",
     );
     let report = app.manager.reload(ports.config(&changed)).await.unwrap();
     assert_eq!(report.updated, vec!["/a/*"]);
@@ -121,6 +122,10 @@ async fn reload_applies_tuning_strategy_and_route_settings_live() {
     assert_eq!(
         lb.config().evaluate_strategy_frequency,
         Duration::from_secs(1)
+    );
+    assert_eq!(
+        lb.config().selector_rebuild_interval,
+        Duration::from_millis(50)
     );
     let thresholds = lb.decision_engine().thresholds();
     assert_eq!(thresholds.min_nr_of_connections, 3);
