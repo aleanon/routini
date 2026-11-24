@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # The three crates are separate packages (no workspace), each with its own lock file and
+  # target directory.
+  check:
+    name: ${{ matrix.crate }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [routini, worker, plain]
+    defaults:
+      run:
+        working-directory: ${{ matrix.crate }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.crate }} -> target
+
+      - uses: taiki-e/install-action@nextest
+        if: matrix.crate == 'routini'
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Test
+        if: matrix.crate == 'routini'
+        run: cargo nextest run --locked --no-fail-fast
+
+      - name: Test
+        if: matrix.crate != 'routini'
+        run: cargo test --locked
+
+      - name: Benchmarks build
+        if: matrix.crate == 'routini'
+        run: cargo bench --locked --no-run

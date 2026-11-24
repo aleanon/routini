@@ -62,6 +62,9 @@ cargo nextest run --no-capture
 cargo nextest run <test-name>
 ```
 
+CI (`.github/workflows/ci.yml`) runs `cargo fmt --check`, `cargo clippy --locked --all-targets
+-- -D warnings` and the tests for each crate; `routini/clippy.toml` holds the clippy settings.
+
 ### Benchmarking
 ```bash
 # Run all benchmarks (generates HTML reports in target/criterion/)
