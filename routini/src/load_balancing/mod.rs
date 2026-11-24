@@ -176,8 +176,22 @@ pub struct Backends<M: Metrics = NoMetric> {
     health_check: Option<Arc<dyn health_check::HealthCheck<M> + Send + Sync + 'static>>,
     /// See [Self::set_health_check_mandatory].
     health_check_mandatory: bool,
-    backends: ArcSwap<BTreeSet<Backend<M>>>,
-    health: ArcSwap<HashMap<u64, Health>>,
+    state: ArcSwap<BackendSet<M>>,
+}
+
+/// The backends and their health, swapped as one so no reader sees a set without its health.
+struct BackendSet<M: Metrics> {
+    backends: Arc<BTreeSet<Backend<M>>>,
+    health: Arc<HashMap<u64, Health>>,
+}
+
+impl<M: Metrics> Default for BackendSet<M> {
+    fn default() -> Self {
+        Self {
+            backends: Default::default(),
+            health: Default::default(),
+        }
+    }
 }
 
 impl<M: Metrics> Backends<M> {
@@ -189,8 +203,7 @@ impl<M: Metrics> Backends<M> {
             discovery,
             health_check: None,
             health_check_mandatory: false,
-            backends: Default::default(),
-            health: Default::default(),
+            state: Default::default(),
         }
     }
 
@@ -223,11 +236,12 @@ impl<M: Metrics> Backends<M> {
         F: Fn(Arc<BTreeSet<Backend<M>>>),
         S: Strategy<M>,
     {
-        if (**self.backends.load()) != new_backends {
-            let old_backends = self.backends.load();
+        let current = self.state.load();
+        if *current.backends != new_backends {
+            let old_backends = &current.backends;
             let mut backends = BTreeSet::new();
 
-            let old_health = self.health.load();
+            let old_health = &current.health;
             let mut health = HashMap::with_capacity(new_backends.len());
 
             for mut backend in new_backends.into_iter() {
@@ -254,20 +268,21 @@ impl<M: Metrics> Backends<M> {
                 backends.insert(backend);
             }
 
-            // TODO: put this all under 1 ArcSwap so the update is atomic
             // It's important the `callback()` executes first since computing selector backends might
             // be expensive. For example, if a caller checks `backends` to see if any are available
             // they may encounter false positives if the selector isn't ready yet.
             let backends = Arc::new(backends);
             callback(backends.clone());
-            self.backends.store(backends);
-            self.health.store(Arc::new(health));
+            self.state.store(Arc::new(BackendSet {
+                backends,
+                health: Arc::new(health),
+            }));
         } else {
             // no backend change, just check enablement
             for (hash_key, backend_enabled) in enablement.iter() {
                 // override enablement if set
                 // this get should always be Some(_) because we already populate `health`` for all known backends
-                if let Some(backend_health) = self.health.load().get(hash_key) {
+                if let Some(backend_health) = current.health.get(hash_key) {
                     backend_health.enable(*backend_enabled);
                 }
             }
@@ -281,11 +296,10 @@ impl<M: Metrics> Backends<M> {
     /// When the health check is set, this function will return false for the `backend` it
     /// doesn't know.
     pub fn ready(&self, backend: &Backend<M>) -> bool {
-        self.health
+        self.state
             .load()
+            .health
             .get(&backend.hash_key())
-            // Racing: return `None` when this function is called between the
-            // backend store and the health store
             .map_or(self.health_check.is_none(), |h| h.ready())
     }
 
@@ -297,14 +311,14 @@ impl<M: Metrics> Backends<M> {
     /// This method is noop when the given backend doesn't exist in the service discovery.
     pub fn set_enable(&self, backend: &Backend<M>, enabled: bool) {
         // this should always be Some(_) because health is always populated during update
-        if let Some(h) = self.health.load().get(&backend.hash_key()) {
+        if let Some(h) = self.state.load().health.get(&backend.hash_key()) {
             h.enable(enabled)
         };
     }
 
     /// Return the collection of the backends.
     pub fn get_backend(&self) -> Arc<BTreeSet<Backend<M>>> {
-        self.backends.load_full()
+        self.state.load().backends.clone()
     }
 
     /// Call the service discovery method to update the collection of backends.
@@ -354,9 +368,10 @@ impl<M: Metrics> Backends<M> {
             return;
         };
 
-        let backends = self.backends.load();
+        let state = self.state.load_full();
+        let backends = &state.backends;
         if parallel {
-            let health_table = self.health.load_full();
+            let health_table = state.health.clone();
             let runtime = current_handle();
             let jobs = backends.iter().map(|backend| {
                 let backend = backend.clone();
@@ -370,7 +385,8 @@ impl<M: Metrics> Backends<M> {
             futures::future::join_all(jobs).await;
         } else {
             for backend in backends.iter() {
-                check_and_report(backend, health_check, &self.health.load()).await;
+                // The current table, as an update meanwhile copies the health into a new one
+                check_and_report(backend, health_check, &self.state.load().health).await;
             }
         }
     }
@@ -449,7 +465,7 @@ where
     pub fn from_backends_with_strategy(backends: Backends<M>, strategy: S) -> Self {
         // Backends already carry their `M` (constructed with `M::default()` during discovery), so
         // there's no metrics reset to do here — just build the initial selector.
-        let selector = strategy.build_backend_selector(&backends.backends.load());
+        let selector = strategy.build_backend_selector(&backends.get_backend());
         LoadBalancer {
             backends,
             strategy: RwLock::new(strategy),
@@ -497,7 +513,7 @@ where
         let strategy = self.strategy.read().await;
         self.selector.store(
             strategy
-                .build_backend_selector(&*self.backends.backends.load())
+                .build_backend_selector(&self.backends.get_backend())
                 .into(),
         );
     }
@@ -517,7 +533,7 @@ where
         *current_strategy = strategy;
         self.selector.store(
             current_strategy
-                .build_backend_selector(&*self.backends.backends.load())
+                .build_backend_selector(&self.backends.get_backend())
                 .into(),
         );
         true
@@ -812,7 +828,7 @@ mod test {
             let mut backend_count = 0;
             while backend_count == 0 {
                 let backends = lb.backends();
-                backend_count = backends.backends.load_full().len();
+                backend_count = backends.get_backend().len();
             }
             assert_eq!(backend_count, expected);
             assert!(lb.select_with(b"test", 1, |_, _| true).is_some());
